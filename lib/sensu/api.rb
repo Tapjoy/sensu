@@ -252,8 +252,13 @@ module Sensu
         clients = pagination(clients)
         unless clients.empty?
           clients.each_with_index do |client_name, index|
-            $redis.get('client:' + client_name) do |client_json|
-              response << Oj.load(client_json)
+            client_key = 'client:' + client_name
+            $redis.get(client_key).callback do |client_json|
+              begin
+                response.push(Oj.load(client_json))
+              rescue Oj::ParseError
+                $logger.warn("Unable to parse client JSON metadata #{client_key} : #{client_json}")
+              end
               if index == clients.size - 1
                 body Oj.dump(response)
               end
