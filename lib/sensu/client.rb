@@ -41,11 +41,28 @@ module Sensu
           connection.periodically_reconnect(5)
         end
       end
+      @rabbitmq.on_connection_interruption do |connection, settings|
+        unless connection.reconnecting?
+          @logger.warn('reconnecting to rabbitmq on connection interruption')
+          connection.periodically_reconnect(5)
+        end
+      end
+      @rabbitmq.on_recovery do |connection, settings|
+        @logger.info('rabbit connection established')
+      end
       @rabbitmq.on_skipped_heartbeats do
         @logger.warn('skipped rabbitmq heartbeat')
         @logger.warn('rabbitmq heartbeats are not recommended for clients')
       end
+
+      # channel setup
       @amq = AMQP::Channel.new(@rabbitmq)
+      @amq.on_error do |channel, channel_close|
+        @logger.warn('rabbitmq channel closed')
+      end
+      @amq.on_recovery do
+        @logger.info('rabbitmq channel recovered')
+      end
       @amq.auto_recovery = true
     end
 
@@ -63,6 +80,8 @@ module Sensu
       @timers << EM::PeriodicTimer.new(20) do
         if @rabbitmq.connected?
           publish_keepalive
+        else
+          @logger.warn('keepalive publish skipped because rabbit is not connected')
         end
       end
     end
@@ -267,6 +286,11 @@ module Sensu
             :signal => signal
           })
           stop
+        end
+      end
+      if Signal.list.include?('INFO')
+        Signal.trap('INFO') do
+          @logger.warn("#{caller * "\n"}")
         end
       end
     end
