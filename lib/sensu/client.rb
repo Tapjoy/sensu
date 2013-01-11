@@ -288,7 +288,7 @@ module Sensu
           stop
         end
       end
-      if Signal.list.include?('INFO')
+      if Signal.list.include?('QUIT')
         Signal.trap('QUIT') do
           @logger.warn("Sensu client signal handler ==> #{caller * "\n"}")
           @logger.warn("Sensu client signal handler ==> #{@checks_in_progress}")
