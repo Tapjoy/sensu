@@ -76,7 +76,7 @@ module Sensu
       end
       @amq = AMQP::Channel.new(@rabbitmq)
       @amq.auto_recovery = true
-      @amq.prefetch(15)
+      @amq.prefetch(20)
       @amq.on_error do |channel, channel_close|
         @logger.fatal('rabbitmq channel closed', {
           :error => {
@@ -437,12 +437,15 @@ module Sensu
     def setup_results
       @logger.debug('subscribing to results')
       @result_queue = @amq.queue('results')
-      @result_queue.subscribe do |payload|
+      @result_queue.subscribe(:ack => true) do |header, payload|
         result = JSON.parse(payload, :symbolize_names => true)
         @logger.debug('received result', {
           :result => result
         })
         process_result(result)
+        EM::next_tick do
+          header.ack
+        end
       end
     end
 
