@@ -76,6 +76,7 @@ module Sensu
       end
       @amq = AMQP::Channel.new(@rabbitmq)
       @amq.auto_recovery = true
+      @amq.prefetch(10)
       @amq.on_error do |channel, channel_close|
         @logger.fatal('rabbitmq channel closed', {
           :error => {
@@ -90,13 +91,15 @@ module Sensu
     def setup_keepalives
       @logger.debug('subscribing to keepalives')
       @keepalive_queue = @amq.queue('keepalives')
-      @keepalive_queue.subscribe do |payload|
+      @keepalive_queue.subscribe(:ack => true) do |header, payload|
         client = JSON.parse(payload, :symbolize_names => true)
         @logger.debug('received keepalive', {
           :client => client
         })
         @redis.set('client:' + client[:name], client.to_json).callback do
-          @redis.sadd('clients', client[:name])
+          @redis.sadd('clients', client[:name]).callback do
+            header.ack
+          end
         end
       end
     end
@@ -493,15 +496,16 @@ module Sensu
       @master_timers << EM::PeriodicTimer.new(30) do
         @redis.smembers('clients').callback do |clients|
           clients.each do |client_name|
+            time = Time.now.to_i
             client_key = 'client:' + client_name
             @redis.get(client_key).callback do |client_json|
               begin
                 client = JSON.parse(client_json.to_s, :symbolize_names => true)
                 check = {
                   :name => 'keepalive',
-                  :issued => Time.now.to_i
+                  :issued => time
                 }
-                time_since_last_keepalive = Time.now.to_i - client[:timestamp]
+                time_since_last_keepalive = time - client[:timestamp]
                 case
                 when time_since_last_keepalive >= 180
                   check[:output] = 'No keep-alive sent from client in over 180 seconds'
