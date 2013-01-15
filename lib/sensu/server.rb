@@ -76,7 +76,7 @@ module Sensu
       end
       @amq = AMQP::Channel.new(@rabbitmq)
       @amq.auto_recovery = true
-      @amq.prefetch(10)
+      @amq.prefetch(15)
       @amq.on_error do |channel, channel_close|
         @logger.fatal('rabbitmq channel closed', {
           :error => {
@@ -499,12 +499,12 @@ module Sensu
             time = Time.now.to_i
             client_key = 'client:' + client_name
             @redis.get(client_key).callback do |client_json|
+              check = {
+                :name => 'keepalive',
+                :issued => time
+              }
               begin
                 client = JSON.parse(client_json.to_s, :symbolize_names => true)
-                check = {
-                  :name => 'keepalive',
-                  :issued => time
-                }
                 time_since_last_keepalive = time - client[:timestamp]
                 case
                 when time_since_last_keepalive >= 180
@@ -525,6 +525,12 @@ module Sensu
                   end
                 end
               rescue JSON::ParserError
+                check[:output] = "Invalid client key #{client_json.inspect} for client #{client_key.inspect} - assuming bad keepalive"
+                check[:status] = 2
+                client = {
+                  :name => client_name
+                }
+                publish_result(client, check)
                 @logger.warn("Unable to parse client entry #{client_key.inspect} : #{client_json.inspect}")
               end
             end
