@@ -252,12 +252,12 @@ module Sensu
         clients = pagination(clients)
         unless clients.empty?
           clients.each_with_index do |client_name, index|
-            client_key = 'client:' + client_name
-            $redis.get(client_key).callback do |client_json|
+            client_key = "client:#{client_name}"
+            $redis.get(client_key) do |client_json|
               begin
                 response.push(Oj.load(client_json))
-              rescue Oj::ParseError
-                $logger.warn("Unable to parse client JSON metadata #{client_key} : #{client_json}")
+              rescue Oj::ParseError => e
+                $logger.warn("Unable to parse client JSON metadata #{client_key} : #{client_json.inspect} : #{e}")
               end
               if index == clients.size - 1
                 body Oj.dump(response)
@@ -315,14 +315,14 @@ module Sensu
 
     adelete %r{/clients?/([\w\.-]+)$} do |client_name|
       client_key = 'client:' + client_name
-      $redis.get(client_key).callback do |client_json|
-        $redis.hgetall('events:' + client_name).callback do |events|
+      $redis.get(client_key) do |client_json|
+        $redis.hgetall('events:' + client_name) do |events|
           events.each do |check_name, event_json|
             resolve_event(event_hash(event_json, client_name, check_name))
           end
           EM::Timer.new(5) do
             begin
-              client = JSON.parse(client_json, :symbolize_names => true)
+              client = JSON.parse(client_json.to_s, :symbolize_names => true)
               $logger.info('deleting client', {
                 :client => client
               })
@@ -332,7 +332,7 @@ module Sensu
             $redis.srem('clients', client_name)
             $redis.del('events:' + client_name)
             $redis.del('client:' + client_name)
-            $redis.smembers('history:' + client_name).callback do |checks|
+            $redis.smembers('history:' + client_name) do |checks|
               checks.each do |check_name|
                 $redis.del('history:' + client_name + ':' + check_name)
                 $redis.del('execution:' + client_name + ':' + check_name)
