@@ -291,8 +291,7 @@ module Sensu
           end
         end
       when @extensions.mutator_exists?(mutator_name)
-        extension = @extensions[:mutators][mutator_name]
-        extension.run(event, @settings.to_hash) do |output, status|
+        @extensions[:mutators][mutator_name].run(event, @settings.to_hash) do |output, status|
           if status == 0
             block.call(output)
           else
