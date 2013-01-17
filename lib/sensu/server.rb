@@ -560,15 +560,16 @@ module Sensu
       @logger.info('determining stale clients')
       @redis.smembers('clients') do |clients|
         clients.each do |client_name|
+          time = Time.now.to_i
           client_key = 'client:' + client_name
           @redis.get(client_key) do |client_json|
             begin
               client = JSON.parse(client_json, :symbolize_names => true)
               check = {
                 :name => 'keepalive',
-                :issued => Time.now.to_i
+                :issued => time
               }
-              time_since_last_keepalive = Time.now.to_i - client[:timestamp]
+              time_since_last_keepalive = time - client[:timestamp]
               case
               when time_since_last_keepalive >= 180
                 check[:output] = 'No keep-alive sent from client in over 180 seconds'
