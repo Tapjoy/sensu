@@ -59,6 +59,7 @@ module Sensu
 
   module Extension
     class Base
+      
       def name
         'base'
       end
@@ -82,7 +83,7 @@ module Sensu
         definition.has_key?(key.to_sym)
       end
 
-      def run(event=nil, &block)
+      def run(event=nil, settings=nil, &block)
         block.call('noop', 0)
       end
 

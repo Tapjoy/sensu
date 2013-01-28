@@ -69,14 +69,18 @@ module Sensu
       end
       @rabbitmq.after_reconnect do
         @logger.info('reconnected to rabbitmq')
+        @amq.prefetch(@settings[:rabbitmq][:prefetch] || 1)
       end
       @amq = @rabbitmq.channel
-      @amq.prefetch(1)
+      @amq.prefetch(@settings[:rabbitmq][:prefetch] || 1)
     end
 
     def setup_keepalives
       @logger.debug('subscribing to keepalives')
-      @keepalive_queue = @amq.queue('keepalives')
+      @amq.queue('keepalives').consumers.each do |consumer_tag, consumer|
+        consumer.cancel
+      end
+      @keepalive_queue = @amq.queue!('keepalives')
       @keepalive_queue.subscribe(:ack => true) do |header, payload|
         client = JSON.parse(payload, :symbolize_names => true)
         @logger.debug('received keepalive', {
@@ -129,7 +133,7 @@ module Sensu
           true
         when hash_one[key].is_a?(Hash) && hash_two[key].is_a?(Hash)
           filter_attributes_match?(hash_one[key], hash_two[key])
-        when hash_one[key].is_a?(String) && hash_one[key].start_with?('eval: ')
+        when hash_one[key].is_a?(String) && hash_one[key].start_with?('eval:')
           begin
             expression = hash_one[key].gsub(/^eval:(\s+)?/, '')
             !!Sandbox.eval(expression, hash_two[key])
@@ -220,7 +224,7 @@ module Sensu
             event_filtered?(filter_name, event)
           end
           if filtered
-            @logger.debug('event filtered for handler', {
+            @logger.info('event filtered for handler', {
               :event => event,
               :handler => handler
             })
@@ -282,7 +286,7 @@ module Sensu
           end
         end
       when @extensions.mutator_exists?(mutator_name)
-        @extensions[:mutators][mutator_name].run(event) do |output, status|
+        @extensions[:mutators][mutator_name].run(event, @settings) do |output, status|
           if status == 0
             block.call(output)
           else
@@ -361,7 +365,7 @@ module Sensu
             end
             @handlers_in_progress_count -= 1
           when 'extension'
-            handler.run(event_data) do |output, status|
+            handler.run(event_data, @settings) do |output, status|
               output.split(/\n+/).each do |line|
                 @logger.info(line)
               end
@@ -490,7 +494,10 @@ module Sensu
 
     def setup_results
       @logger.debug('subscribing to results')
-      @result_queue = @amq.queue('results')
+      @amq.queue('results').consumers.each do |consumer_tag, consumer|
+        consumer.cancel
+      end
+      @result_queue = @amq.queue!('results')
       @result_queue.subscribe(:ack => true) do |header, payload|
         result = JSON.parse(payload, :symbolize_names => true)
         @logger.debug('received result', {
@@ -553,30 +560,36 @@ module Sensu
       @logger.info('determining stale clients')
       @redis.smembers('clients') do |clients|
         clients.each do |client_name|
-          @redis.get('client:' + client_name) do |client_json|
-            client = JSON.parse(client_json, :symbolize_names => true)
-            check = {
-              :name => 'keepalive',
-              :issued => Time.now.to_i
-            }
-            time_since_last_keepalive = Time.now.to_i - client[:timestamp]
-            case
-            when time_since_last_keepalive >= 180
-              check[:output] = 'No keep-alive sent from client in over 180 seconds'
-              check[:status] = 2
-              publish_result(client, check)
-            when time_since_last_keepalive >= 120
-              check[:output] = 'No keep-alive sent from client in over 120 seconds'
-              check[:status] = 1
-              publish_result(client, check)
-            else
-              @redis.hexists('events:' + client[:name], 'keepalive') do |exists|
-                if exists
-                  check[:output] = 'Keep-alive sent from client'
-                  check[:status] = 0
-                  publish_result(client, check)
+          time = Time.now.to_i
+          client_key = 'client:' + client_name
+          @redis.get(client_key) do |client_json|
+            begin
+              client = JSON.parse(client_json.to_s, :symbolize_names => true)
+              check = {
+                :name => 'keepalive',
+                :issued => time
+              }
+              time_since_last_keepalive = time - client[:timestamp]
+              case
+              when time_since_last_keepalive >= 180
+                check[:output] = 'No keep-alive sent from client in over 180 seconds'
+                check[:status] = 2
+                publish_result(client, check)
+              when time_since_last_keepalive >= 120
+                check[:output] = 'No keep-alive sent from client in over 120 seconds'
+                check[:status] = 1
+                publish_result(client, check)
+              else
+                @redis.hexists('events:' + client[:name], 'keepalive') do |exists|
+                  if exists
+                    check[:output] = 'Keep-alive sent from client'
+                    check[:status] = 0
+                    publish_result(client, check)
+                  end
                 end
               end
+            rescue JSON::ParserError
+              @logger.warn("Unable to parse client entry #{client_key.inspect} : #{client_json.inspect}")
             end
           end
         end
@@ -703,6 +716,7 @@ module Sensu
       @keepalive_queue.unsubscribe
       @result_queue.unsubscribe
       if @rabbitmq.connected?
+        @amq.recover
         timestamp = Time.now.to_i
         retry_until_true do
           if !@keepalive_queue.subscribed? && !@result_queue.subscribed?
