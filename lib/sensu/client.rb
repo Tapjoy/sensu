@@ -74,6 +74,33 @@ module Sensu
       @amq.queue('results').publish(payload.to_json)
     end
 
+    # if the command is a ruby script it is around 20 times faster to fork the client
+    # process than to sh -c ruby the script and it doesn't spike the CPU nearly as much
+    def execute_with_ruby_fork(command)
+      @logger.debug('attempting to execute command in ruby fork', {
+        :command => command
+      })
+      # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
+      # So we have to do the output capture manually.
+      rd, wr = ::IO.pipe
+      child_pid = ::Kernel.fork do
+        rd.close
+        STDOUT.reopen(wr)
+        file, *args = command.split
+        ARGV.replace(args)
+        load(file,true)
+      end
+      wr.close
+      output = rd.read
+      rd.close
+      pid, status = ::Process.waitpid2(child_pid)
+      [output, status.exitstatus]
+    end
+
+    def fork_ruby_check?(check)
+      check[:fork] || ( @settings[:client][:fork_ruby_checks] && check[:command].split[0].end_with?(".rb") )
+    end
+
     def execute_check(check)
       @logger.debug('attempting to execute check', {
         :check => check
@@ -98,7 +125,11 @@ module Sensu
           execute = Proc.new do
             started = Time.now.to_f
             begin
-              check[:output], check[:status] = IO.popen(command, 'r', check[:timeout])
+              check[:output], check[:status] = if fork_ruby_check?(check)
+                                                 execute_with_ruby_fork(command)
+                                               else
+                                                 IO.popen(command, 'r', check[:timeout])
+                                               end
             rescue => error
               @logger.warn('unexpected error', {
                 :error => error.to_s
