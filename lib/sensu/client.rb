@@ -86,7 +86,7 @@ module Sensu
       child_pid = ::Kernel.fork do
         rd.close
         STDOUT.reopen(wr)
-        file, *args = command.split
+        file, *args = Shellwords.split(command)
         ARGV.replace(args)
         load(file,true)
       end
