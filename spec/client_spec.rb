@@ -75,6 +75,20 @@ describe 'Sensu::Client' do
     end
   end
 
+  it 'can execute a ruby check in a forked process' do
+    async_wrapper do
+      @client.setup_rabbitmq
+      @client.execute_check(check_template.merge({:command => "#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", :fork => true}))
+      amq.queue('results').subscribe do |headers, payload|
+        result = JSON.parse(payload, :symbolize_names => true)
+        result[:client].should eq('i-424242')
+        result[:check][:output].should eq('ruby forked process with 4 args ["arg list", "of", "things", "^reg ex$"]')
+        async_done
+      end
+    end
+  end
+
+
   it 'can substitute check command tokens with attributes and execute it' do
     async_wrapper do
       result_queue do |queue|
