@@ -112,9 +112,15 @@ module Sensu
         @checks_in_progress.push(check[:name])
         unmatched_tokens = Array.new
         command = check[:command].gsub(/:::(.*?):::/) do
-          token = $1.to_s
-          matched = token.split('.').inject(@settings[:client]) do |client, attribute|
-            client[attribute].nil? ? break : client[attribute]
+          config = @settings[:client]
+          token_fields = $1.to_s.split('.')
+          # if token is :::settings.something::: look in full settings hash
+          if token_fields[0] == 'settings' 
+            config = @settings
+            token_fields = token_fields[1..-1]
+          end
+          matched = token_fields.inject(config) do |setting, attribute|
+            setting[attribute].nil? ? break : setting[attribute]
           end
           if matched.nil?
             unmatched_tokens.push(token)
