@@ -41,7 +41,14 @@ module Sensu
       type = category.to_s.chop
 
       define_method((type + '_exists?').to_sym) do |name|
-        @settings[category].has_key?(name.to_sym)
+        begin
+          @settings[category].has_key?(name.to_sym)
+        rescue
+          @logger.error('Error testing check existence for check', {
+                          :invalid_check_name => name
+                        })
+          false
+        end
       end
 
       define_method(('invalid_' + type).to_sym) do |details, reason|
