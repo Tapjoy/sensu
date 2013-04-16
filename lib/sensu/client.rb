@@ -1,5 +1,6 @@
 require File.join(File.dirname(__FILE__), 'base')
 require File.join(File.dirname(__FILE__), 'socket')
+require 'timeout'
 
 module Sensu
   class Client
@@ -76,25 +77,42 @@ module Sensu
 
     # if the command is a ruby script it is around 20 times faster to fork the client
     # process than to sh -c ruby the script and it doesn't spike the CPU nearly as much
-    def execute_with_ruby_fork(command)
-      @logger.debug('attempting to execute command in ruby fork', {
-        :command => command
-      })
-      # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
-      # So we have to do the output capture manually.
-      rd, wr = ::IO.pipe
-      child_pid = ::Kernel.fork do
-        rd.close
-        STDOUT.reopen(wr)
-        file, *args = Shellwords.split(command)
-        ARGV.replace(args)
-        load(file,true)
+    # check_timeout is set by configuring check[:timeout] in the check json
+    def execute_with_ruby_fork(command, check_timeout=60)
+      begin
+        # set this so we can access it later
+        child_pid = nil
+        # wrap the whole thing in the timeout
+        timeout(check_timeout) do
+          @logger.debug('attempting to execute command in ruby fork', {
+            :command => command
+          })
+          
+          # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
+          # So we have to do the output capture manually.
+          rd, wr = ::IO.pipe
+          child_pid = ::Kernel.fork do
+            rd.close
+            STDOUT.reopen(wr)
+            file, *args = Shellwords.split(command)
+            ARGV.replace(args)
+            load(file,true)
+          end
+          wr.close
+          output = rd.read
+          rd.close
+        
+          IO.send(:wait_on_process, child_pid)
+        end
+      rescue Timeout::Error => e
+        @logger.warn('command timed out; process will be terminated', {
+          :command => command,
+          :timeout => check_timeout,
+          :pid => child_pid
+        })
+        IO.send(:kill_process_group, child_pid)
+        raise e
       end
-      wr.close
-      output = rd.read
-      rd.close
-      pid, status = ::Process.waitpid2(child_pid)
-      [output, status.exitstatus]
     end
 
     def fork_ruby_check?(check)
@@ -132,13 +150,14 @@ module Sensu
             started = Time.now.to_f
             begin
               check[:output], check[:status] = if fork_ruby_check?(check)
-                                                 execute_with_ruby_fork(command)
+                                                 execute_with_ruby_fork(command, check[:timeout])
                                                else
                                                  IO.popen(command, 'r', check[:timeout])
                                                end
             rescue => error
               @logger.warn('unexpected error', {
-                :error => error.to_s
+                :error => error.to_s,
+                :command => command
               })
               check[:output] = 'Unexpected error: ' + error.to_s
               check[:status] = 2
