@@ -123,7 +123,7 @@ module Sensu
           output = rd.read
           rd.close
         
-          IO.send(:wait_on_process, child_pid)
+          IO.send(:wait_on_process_group, child_pid)
         end
       rescue Timeout::Error => e
         @logger.warn('command timed out; process will be terminated', {
