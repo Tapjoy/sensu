@@ -108,7 +108,6 @@ module Sensu
           @logger.debug('attempting to execute command in ruby fork', {
             :command => command
           })
-          
           # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
           # So we have to do the output capture manually.
           rd, wr = ::IO.pipe
@@ -122,8 +121,9 @@ module Sensu
           wr.close
           output = rd.read
           rd.close
-        
-          IO.send(:wait_on_process_group, child_pid)
+          
+          pid, status = ::Process.wait2(child_pid)
+          [output, status.exitstatus]
         end
       rescue Timeout::Error => e
         @logger.warn('command timed out; process will be terminated', {
@@ -131,7 +131,7 @@ module Sensu
           :timeout => check_timeout,
           :pid => child_pid
         })
-        IO.send(:kill_process_group, child_pid)
+        ::Process.kill(9, child_pid)
         raise e
       end
     end
