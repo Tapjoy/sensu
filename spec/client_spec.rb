@@ -47,7 +47,7 @@ describe 'Sensu::Client' do
       amq.queue('results').subscribe do |headers, payload|
         result = JSON.parse(payload, :symbolize_names => true)
         result[:client].should eq('i-424242')
-        result[:check][:name].should eq('foobar')
+        result[:check][:name].should match /foobar/
         async_done
       end
     end
@@ -60,7 +60,7 @@ describe 'Sensu::Client' do
       amq.queue('results').subscribe do |headers, payload|
         result = JSON.parse(payload, :symbolize_names => true)
         result[:client].should eq('i-424242')
-        result[:check][:output].should eq('WARNING')
+        result[:check][:output].should match /WARNING/
         async_done
       end
     end
@@ -79,6 +79,12 @@ describe 'Sensu::Client' do
     end
   end
 
+  it 'supports timeouts for hanging processes' do
+    lambda { @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 1) }.should raise_error Timeout::Error
+    lambda { @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 3) }.should_not raise_error
+    @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 3).should =~ ["ruby forked process with 4 args [\"arg list\", \"of\", \"things\", \"^reg ex$\"]", 0]
+  end
+
 
   it 'can substitute check command tokens with attributes and execute it' do
     async_wrapper do
@@ -89,7 +95,7 @@ describe 'Sensu::Client' do
       amq.queue('results').subscribe do |headers, payload|
         result = JSON.parse(payload, :symbolize_names => true)
         result[:client].should eq('i-424242')
-        result[:check][:output].should eq('true')
+        result[:check][:output].should match /true/
         async_done
       end
     end
@@ -135,7 +141,7 @@ describe 'Sensu::Client' do
       amq.queue('results').subscribe do |headers, payload|
         result = JSON.parse(payload, :symbolize_names => true)
         result[:client].should eq('i-424242')
-        result[:check][:output].should eq('WARNING')
+        result[:check][:output].should match /WARNING/
         result[:check][:status].should eq(1)
         async_done
       end
@@ -168,7 +174,7 @@ describe 'Sensu::Client' do
         result = JSON.parse(payload, :symbolize_names => true)
         result[:client].should eq('i-424242')
         result[:check][:name].should eq('standalone')
-        result[:check][:output].should eq('foobar')
+        result[:check][:output].should match /foobar/
         result[:check][:status].should eq(1)
         async_done
       end

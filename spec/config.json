@@ -27,6 +27,14 @@
       "command": "./spec/mutators/tag.rb"
     }
   },
+  "rabbitmq": {
+    "host": "localhost",
+    "vhost": "/",
+    "port": 5672,
+    "user": "guest",
+    "password": "guest",
+    "prefetch": null
+  },
   "handlers": {
     "default": {
       "type": "set",
