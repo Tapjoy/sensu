@@ -404,7 +404,7 @@ describe 'Sensu::Server' do
         binding.subscribe do |payload|
           check_request = JSON.parse(payload, :symbolize_names => true)
           check_request[:name].should eq('foobar')
-          check_request[:command].should eq('echo -n WARNING && exit 1')
+          check_request[:command].should eq('echo WARNING && exit 1')
           check_request[:issued].should be_within(10).of(epoch)
           async_done
         end
