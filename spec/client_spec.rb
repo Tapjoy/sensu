@@ -80,8 +80,7 @@ describe 'Sensu::Client' do
   end
 
   it 'supports timeouts for hanging processes' do
-    lambda { @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 1) }.should raise_error Timeout::Error
-    lambda { @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 3) }.should_not raise_error
+    @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 1).should =~ ["Unexpected error: execution expired\n", 3]
     @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 3).should =~ ["ruby forked process with 4 args [\"arg list\", \"of\", \"things\", \"^reg ex$\"]", 0]
   end
 
