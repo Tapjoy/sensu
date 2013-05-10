@@ -1,6 +1,5 @@
 require File.join(File.dirname(__FILE__), 'base')
 require File.join(File.dirname(__FILE__), 'socket')
-require 'timeout'
 
 module Sensu
   class Client
@@ -99,41 +98,57 @@ module Sensu
     # if the command is a ruby script it is around 20 times faster to fork the client
     # process than to sh -c ruby the script and it doesn't spike the CPU nearly as much
     # check_timeout is set by configuring check[:timeout] in the check json
-    def execute_with_ruby_fork(command, check_timeout=60)
-      begin
-        # set this so we can access it later
-        child_pid = nil
-        # wrap the whole thing in the timeout
-        timeout(check_timeout) do
-          @logger.debug('attempting to execute command in ruby fork', {
-            :command => command
-          })
-          # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
-          # So we have to do the output capture manually.
-          rd, wr = ::IO.pipe
-          child_pid = ::Kernel.fork do
-            rd.close
-            STDOUT.reopen(wr)
-            file, *args = Shellwords.split(command)
-            ARGV.replace(args)
-            load(file,true)
-          end
-          wr.close
-          output = rd.read
-          rd.close
-          
-          pid, status = ::Process.wait2(child_pid)
-          [output, status.exitstatus]
+    def execute_with_ruby_fork(command, check_timeout = nil)
+      check_timeout ||= 60
+
+      @logger.debug('attempting to execute command in ruby fork', {
+        :command => command
+      })
+
+      # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
+      # So we have to do the output capture manually.
+      # child in/out is used to read output from the fork
+      # parent in/out is used to ensure the child process dies when the parent dies
+      child_in, child_out = ::IO.pipe
+      parent_in, parent_out = ::IO.pipe
+
+      child_pid = Kernel.fork do
+        # Unused streams
+        parent_out.close
+        parent_in.sync = true
+        child_in.close
+
+        # Start a thread that will ensure this child process exits when
+        # the parent process goes away or the timeout expires
+        Thread.new do
+          timed_out = !::IO.select([parent_in], nil, nil, check_timeout)
+          puts 'Unexpected error: execution expired' if timed_out
+          Kernel.exit(3)
         end
-      rescue Timeout::Error => e
-        @logger.warn('command timed out; process will be terminated', {
-          :command => command,
-          :timeout => check_timeout,
-          :pid => child_pid
-        })
-        ::Process.kill(9, child_pid)
-        raise e
+
+        # Use the piped stream so that the parent process can read the output
+        STDOUT.reopen(child_out)
+
+        # Run the command
+        file, *args = Shellwords.split(command)
+        ARGV.replace(args)
+        load(file, true)
       end
+
+      # Unused streams
+      parent_in.close
+      parent_out.sync = true
+      child_out.close
+
+      # Wait for the child to complete
+      pid, status = ::Process.wait2(child_pid)
+      output = child_in.read
+
+      # Remaining unused streams
+      parent_out.close
+      child_in.close
+
+      [output, status.exitstatus]
     end
 
     def fork_ruby_check?(check)
