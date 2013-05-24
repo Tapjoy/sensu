@@ -271,16 +271,6 @@ module Sensu
     end
 
     def mutate_event_data(mutator_name, event, &block)
-<<<<<<< HEAD
-=======
-      on_error = Proc.new do |error|
-        @logger.error('mutator error', {
-          :event => event,
-          :mutator => mutator_name,
-          :error => error.to_s
-        })
-      end
->>>>>>> 580e2a7... Fix string concat and error message on mutator extension failures
       case
       when mutator_name.nil?
         block.call(Oj.dump(event))
