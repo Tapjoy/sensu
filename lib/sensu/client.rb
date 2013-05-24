@@ -87,26 +87,24 @@ module Sensu
       # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
       # So we have to do the output capture manually.
       # child in/out is used to read output from the fork
-      # parent in/out is used to ensure the child process dies when the parent dies
       child_in, child_out = ::IO.pipe
-      parent_in, parent_out = ::IO.pipe
 
       child_pid = Kernel.fork do
         # Unused streams
-        parent_out.close
-        parent_in.sync = true
         child_in.close
-
-        # Start a thread that will ensure this child process exits when
-        # the parent process goes away or the timeout expires
-        Thread.new do
-          timed_out = !::IO.select([parent_in], nil, nil, check_timeout)
-          puts 'Unexpected error: execution expired' if timed_out
-          Kernel.exit(3)
-        end
 
         # Use the piped stream so that the parent process can read the output
         STDOUT.reopen(child_out)
+
+        # Ensure the command runs within a given period of time
+        Thread.new do
+          sleep(check_timeout)
+          begin
+            puts "Unexpected error: execution expired [#{check_timeout}s]"
+          ensure
+            Kernel.exit(3)
+          end
+        end
 
         # Run the command
         file, *args = Shellwords.split(command)
@@ -115,8 +113,6 @@ module Sensu
       end
 
       # Unused streams
-      parent_in.close
-      parent_out.sync = true
       child_out.close
 
       # Wait for the child to complete
@@ -124,7 +120,6 @@ module Sensu
       output = child_in.read
 
       # Remaining unused streams
-      parent_out.close
       child_in.close
 
       [output, status.exitstatus]
