@@ -155,7 +155,7 @@ module Sensu
       check[:fork] || ( @settings[:client][:fork_ruby_checks] && check[:command].split[0].end_with?(".rb") )
     end
 
-    def execute_check(check)
+    def execute_check_command(check)
       @logger.debug('attempting to execute check', {
         :check => check
       })

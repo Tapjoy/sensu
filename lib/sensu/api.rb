@@ -7,6 +7,7 @@ gem 'async_sinatra', '1.0.0'
 
 require 'thin'
 require 'sinatra/async'
+require 'json'
 
 module Sensu
   class API < Sinatra::Base
@@ -341,7 +342,7 @@ module Sensu
             end
             issued!
           end
-          accepted!
+          accepted!(Oj.dump(:accepted => Time.now.to_i))
         end
       end
     end
