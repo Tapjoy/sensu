@@ -88,7 +88,6 @@ module Sensu
       # So we have to do the output capture manually.
       # child in/out is used to read output from the fork
       child_in, child_out = ::IO.pipe
-
       child_pid = Kernel.fork do
         # Unused streams
         child_in.close
@@ -96,21 +95,14 @@ module Sensu
         # Use the piped stream so that the parent process can read the output
         STDOUT.reopen(child_out)
 
-        # Ensure the command runs within a given period of time
-        Thread.new do
-          sleep(check_timeout)
-          begin
-            puts "Unexpected error: execution expired [#{check_timeout}s]"
-          ensure
-            Kernel.exit(3)
-          end
-        end
-
         # Run the command
         file, *args = Shellwords.split(command)
         ARGV.replace(args)
         load(file, true)
       end
+
+      # Kill the process if it runs for too long (ignore output from kill command)
+      ::Process.detach(spawn("sleep #{check_timeout} && kill -9 #{child_pid} > /dev/null 2>&1"))
 
       # Unused streams
       child_out.close
@@ -122,7 +114,12 @@ module Sensu
       # Remaining unused streams
       child_in.close
 
-      [output, status.exitstatus]
+      exit_status = status.exitstatus || begin
+        # Lack of an exit status means we killed it
+        output = "Unexpected error: execution expired [#{check_timeout}s]\n"
+        3
+      end
+      [output, exit_status]
     end
 
     def fork_ruby_check?(check)
