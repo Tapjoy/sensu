@@ -342,7 +342,6 @@ module Sensu
               end
               issued!
             end
-            accepted!(Oj.dump(:accepted => Time.now.to_i))
           end
         else
           not_found!

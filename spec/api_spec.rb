@@ -291,7 +291,7 @@ describe 'Sensu::API' do
   it 'can not delete a noexistent client' do
     api_test do
       api_request('/client/nonexistent', :delete) do |http, body|
-        http.response_header.status.should eq(202)
+        http.response_header.status.should eq(404)
         body.should be_empty
         async_done
       end

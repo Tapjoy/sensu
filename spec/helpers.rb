@@ -19,8 +19,8 @@ module Helpers
       @redis = EM::Protocols::Redis.connect
       @redis
     rescue => e
-      raise "Redis needs to be running locally!"
       @redis = nil
+      raise "Redis needs to be running locally!"
     end
   end
 
@@ -152,13 +152,16 @@ module Helpers
     if request_options[:body].is_a?(Hash) || request_options[:body].is_a?(Array)
       request_options[:body] = Oj.dump(request_options[:body])
     end
-    http = EM::HttpRequest.new('http://localhost:4567' + uri).send(method, request_options)
-    http.callback do
-      body = case
-      when http.response.empty?
-        http.response
-      else
-        Oj.load(http.response)
+    begin
+      http = EM::HttpRequest.new('http://localhost:4567' + uri).send(method, request_options)
+      http.callback do
+        body = case
+        when http.response.empty?
+          http.response
+        else
+          Oj.load(http.response)
+        end
+        block.call(http, body)
       end
     rescue
       raise "Rabbit needs to be running locally!"

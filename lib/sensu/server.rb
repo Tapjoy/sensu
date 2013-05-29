@@ -297,7 +297,7 @@ module Sensu
           else
             @logger.error('mutator error', {
               :event => event,
-              :extension => extension,
+              :extension => @extensions[:mutators][mutator_name],
               :error => 'non-zero exit status (' + status.to_s + '): ' + output.to_s
             })
           end
@@ -588,7 +588,8 @@ module Sensu
               client = Oj.load(client_json.to_s)
               check = {
                 :name => 'keepalive',
-                :issued => time
+                :issued => time,
+                :executed => time
               }
               time_since_last_keepalive = time - client[:timestamp]
               case
