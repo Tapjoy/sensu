@@ -585,7 +585,7 @@ module Sensu
           client_key = 'client:' + client_name
           @redis.get(client_key) do |client_json|
             begin
-              client = JSON.parse(client_json.to_s, :symbolize_names => true)
+              client = Oj.load(client_json.to_s)
               check = {
                 :name => 'keepalive',
                 :issued => time
@@ -603,7 +603,7 @@ module Sensu
                 check[:status] = 0
               end
               publish_result(client, check)
-            rescue JSON::ParserError
+            rescue Oj::ParseError
               @logger.warn("Unable to parse client entry #{client_key.inspect} : #{client_json.inspect}")
             end
           end

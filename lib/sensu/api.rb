@@ -7,7 +7,6 @@ gem 'async_sinatra', '1.0.0'
 
 require 'thin'
 require 'sinatra/async'
-require 'json'
 
 module Sensu
   class API < Sinatra::Base
@@ -324,11 +323,11 @@ module Sensu
             end
             EM::Timer.new(5) do
               begin
-                client = JSON.parse(client_json.to_s, :symbolize_names => true)
+                client = Oj.load(client_json.to_s)
                 $logger.info('deleting client', {
                   :client => client
                 })
-              rescue JSON::ParserError
+              rescue Oj::ParseError
                 $logger.warn("Unable to parse client metadata #{client_key.inspect} : #{client_json.inspect}")
               end
               $redis.srem('clients', client_name)
