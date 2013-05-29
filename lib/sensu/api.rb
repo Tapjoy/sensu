@@ -317,32 +317,36 @@ module Sensu
     adelete %r{/clients?/([\w\.-]+)$} do |client_name|
       client_key = 'client:' + client_name
       $redis.get(client_key) do |client_json|
-        $redis.hgetall('events:' + client_name) do |events|
-          events.each do |check_name, event_json|
-            resolve_event(event_hash(event_json, client_name, check_name))
-          end
-          EM::Timer.new(5) do
-            begin
-              client = JSON.parse(client_json.to_s, :symbolize_names => true)
-              $logger.info('deleting client', {
-                :client => client
-              })
-            rescue JSON::ParserError
-              $logger.warn("Unable to parse client metadata #{client_key.inspect} : #{client_json.inspect}")
+        unless client_json.nil?
+          $redis.hgetall('events:' + client_name) do |events|
+            events.each do |check_name, event_json|
+              resolve_event(event_hash(event_json, client_name, check_name))
             end
-            $redis.srem('clients', client_name)
-            $redis.del('events:' + client_name)
-            $redis.del('client:' + client_name)
-            $redis.smembers('history:' + client_name) do |checks|
-              checks.each do |check_name|
-                $redis.del('history:' + client_name + ':' + check_name)
-                $redis.del('execution:' + client_name + ':' + check_name)
+            EM::Timer.new(5) do
+              begin
+                client = JSON.parse(client_json.to_s, :symbolize_names => true)
+                $logger.info('deleting client', {
+                  :client => client
+                })
+              rescue JSON::ParserError
+                $logger.warn("Unable to parse client metadata #{client_key.inspect} : #{client_json.inspect}")
               end
-              $redis.del('history:' + client_name)
+              $redis.srem('clients', client_name)
+              $redis.del('events:' + client_name)
+              $redis.del('client:' + client_name)
+              $redis.smembers('history:' + client_name) do |checks|
+                checks.each do |check_name|
+                  $redis.del('history:' + client_name + ':' + check_name)
+                  $redis.del('execution:' + client_name + ':' + check_name)
+                end
+                $redis.del('history:' + client_name)
+              end
+              issued!
             end
-            issued!
+            accepted!(Oj.dump(:accepted => Time.now.to_i))
           end
-          accepted!(Oj.dump(:accepted => Time.now.to_i))
+        else
+          not_found!
         end
       end
     end
