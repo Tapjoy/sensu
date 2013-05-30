@@ -291,13 +291,14 @@ module Sensu
           end
         end
       when @extensions.mutator_exists?(mutator_name)
-        @extensions[:mutators][mutator_name].run(event, @settings.to_hash) do |output, status|
+        extension = @extensions[:mutators][mutator_name]
+        extension.run(event, @settings.to_hash) do |output, status|
           if status == 0
             block.call(output)
           else
             @logger.error('mutator error', {
               :event => event,
-              :extension => @extensions[:mutators][mutator_name],
+              :extension => extension,
               :error => 'non-zero exit status (' + status.to_s + '): ' + output.to_s
             })
           end

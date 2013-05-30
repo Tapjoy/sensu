@@ -139,7 +139,7 @@ module Sensu
 
       exit_status = status.exitstatus || begin
         # Lack of an exit status means we killed it
-        output = "Unexpected error: execution expired [#{check_timeout}s]\n"
+        output = "#{output}Unexpected error: execution expired [#{check_timeout}s]\n"
         3
       end
       [output, exit_status]
@@ -154,14 +154,9 @@ module Sensu
         :check => check
       })
       unless @checks_in_progress.include?(check[:name])
-        @logger.debug('executing check', {
-          :check => check
-        })
         @checks_in_progress << check[:name]
-        
         command, unmatched_tokens = substitute_command_tokens(check)
         check[:executed] = Time.now.to_i
-
         if unmatched_tokens.empty?
           execute = Proc.new do
             @logger.debug('executing check command', {
@@ -175,10 +170,6 @@ module Sensu
                                                  IO.popen(command, 'r', check[:timeout])
                                                end
             rescue => error
-              @logger.warn('unexpected error', {
-                :error => error.to_s,
-                :command => command
-              })
               check[:output] = 'Unexpected error: ' + error.to_s
               check[:status] = 3
             end

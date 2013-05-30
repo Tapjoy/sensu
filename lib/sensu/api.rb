@@ -340,8 +340,8 @@ module Sensu
                 end
                 $redis.del('history:' + client_name)
               end
-              issued!
             end
+            issued!
           end
         else
           not_found!
