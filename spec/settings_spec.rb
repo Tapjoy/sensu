@@ -66,4 +66,8 @@ describe 'Sensu::Settings' do
     @settings[:checks][:tokens].should be_kind_of(Hash)
     @settings['checks']['tokens'].should be_kind_of(Hash)
   end
+
+  it "doesn't crash on bad check names" do
+    @settings.check_exists?(nil).should be false
+  end
 end
