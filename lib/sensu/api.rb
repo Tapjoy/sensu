@@ -252,8 +252,13 @@ module Sensu
         clients = pagination(clients)
         unless clients.empty?
           clients.each_with_index do |client_name, index|
-            $redis.get('client:' + client_name) do |client_json|
-              response << Oj.load(client_json)
+            client_key = "client:#{client_name}"
+            $redis.get(client_key) do |client_json|
+              begin
+                response.push(Oj.load(client_json))
+              rescue Oj::ParseError => e
+                $logger.warn("Unable to parse client JSON metadata #{client_key} : #{client_json.inspect} : #{e}")
+              end
               if index == clients.size - 1
                 body Oj.dump(response)
               end
@@ -309,17 +314,22 @@ module Sensu
     end
 
     adelete %r{/clients?/([\w\.-]+)$} do |client_name|
-      $redis.get('client:' + client_name) do |client_json|
+      client_key = 'client:' + client_name
+      $redis.get(client_key) do |client_json|
         unless client_json.nil?
           $redis.hgetall('events:' + client_name) do |events|
             events.each do |check_name, event_json|
               resolve_event(event_hash(event_json, client_name, check_name))
             end
             EM::Timer.new(5) do
-              client = Oj.load(client_json)
-              $logger.info('deleting client', {
-                :client => client
-              })
+              begin
+                client = Oj.load(client_json.to_s)
+                $logger.info('deleting client', {
+                  :client => client
+                })
+              rescue Oj::ParseError
+                $logger.warn("Unable to parse client metadata #{client_key.inspect} : #{client_json.inspect}")
+              end
               $redis.srem('clients', client_name)
               $redis.del('events:' + client_name)
               $redis.del('client:' + client_name)

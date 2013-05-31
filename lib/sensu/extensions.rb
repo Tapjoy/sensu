@@ -85,6 +85,7 @@ module Sensu
 
   module Extension
     class Base
+      
       def name
         'base'
       end

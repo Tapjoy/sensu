@@ -79,7 +79,14 @@ module Sensu
       unmatched_tokens = Array.new
       substituted = check[:command].gsub(/:::(.*?):::/) do
         token = $1.to_s
-        matched = token.split('.').inject(@settings[:client]) do |client, attribute|
+        token_fields = token.split('.')
+        config = @settings[:client]
+        # if token is :::settings.something::: look in full settings hash
+        if token_fields[0] == 'settings' 
+          config = @settings
+          token_fields = token_fields[1..-1]
+        end
+        matched = token_fields.inject(config) do |client, attribute|
           client[attribute].nil? ? break : client[attribute]
         end
         if matched.nil?
@@ -90,8 +97,60 @@ module Sensu
       [substituted, unmatched_tokens]
     end
 
+    # if the command is a ruby script it is around 20 times faster to fork the client
+    # process than to sh -c ruby the script and it doesn't spike the CPU nearly as much
+    # check_timeout is set by configuring check[:timeout] in the check json
+    def execute_with_ruby_fork(command, check_timeout = nil)
+      check_timeout ||= 60
+
+      @logger.debug('attempting to execute command in ruby fork', {
+        :command => command
+      })
+
+      # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
+      # So we have to do the output capture manually.
+      # child in/out is used to read output from the fork
+      child_in, child_out = ::IO.pipe
+      child_pid = Kernel.fork do
+        # Unused streams
+        child_in.close
+
+        # Use the piped stream so that the parent process can read the output
+        STDOUT.reopen(child_out)
+
+        # Run the command
+        file, *args = Shellwords.split(command)
+        ARGV.replace(args)
+        load(file, true)
+      end
+
+      # Kill the process if it runs for too long (ignore output from kill command)
+      ::Process.detach(spawn("sleep #{check_timeout} && kill -9 #{child_pid} > /dev/null 2>&1"))
+
+      # Unused streams
+      child_out.close
+
+      # Wait for the child to complete
+      pid, status = ::Process.wait2(child_pid)
+      output = child_in.read
+
+      # Remaining unused streams
+      child_in.close
+
+      exit_status = status.exitstatus || begin
+        # Lack of an exit status means we killed it
+        output = "#{output}Unexpected error: execution expired [#{check_timeout}s]\n"
+        3
+      end
+      [output, exit_status]
+    end
+
+    def fork_ruby_check?(check)
+      check[:fork] || ( @settings[:client][:fork_ruby_checks] && check[:command].split[0].end_with?(".rb") )
+    end
+
     def execute_check_command(check)
-      @logger.debug('attempting to execute check command', {
+      @logger.debug('attempting to execute check', {
         :check => check
       })
       unless @checks_in_progress.include?(check[:name])
@@ -105,10 +164,14 @@ module Sensu
             })
             started = Time.now.to_f
             begin
-              check[:output], check[:status] = IO.popen(command, 'r', check[:timeout])
+              check[:output], check[:status] = if fork_ruby_check?(check)
+                                                 execute_with_ruby_fork(command, check[:timeout])
+                                               else
+                                                 IO.popen(command, 'r', check[:timeout])
+                                               end
             rescue => error
               check[:output] = 'Unexpected error: ' + error.to_s
-              check[:status] = 2
+              check[:status] = 3
             end
             check[:duration] = ('%.3f' % (Time.now.to_f - started)).to_f
             check
