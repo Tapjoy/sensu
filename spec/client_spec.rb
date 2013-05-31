@@ -75,6 +75,24 @@ describe 'Sensu::Client' do
     end
   end
 
+  it 'can execute a ruby check in a forked process' do
+    async_wrapper do
+      @client.setup_rabbitmq
+      @client.execute_check_command(check_template.merge({:command => "#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", :fork => true}))
+      amq.queue('results').subscribe do |headers, payload|
+        result = Oj.load(payload)
+        result[:client].should eq('i-424242')
+        result[:check][:output].should eq('ruby forked process with 4 args ["arg list", "of", "things", "^reg ex$"]')
+        async_done
+      end
+    end
+  end
+
+  it 'supports timeouts for hanging processes' do
+    @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 1).should =~ ["Unexpected error: execution expired [1s]\n", 3]
+    @client.execute_with_ruby_fork("#{File.dirname(__FILE__)}/ruby_fork_test.rb \"arg list\" of things \"^reg ex$\"", 3).should =~ ["ruby forked process with 4 args [\"arg list\", \"of\", \"things\", \"^reg ex$\"]", 0]
+  end
+
   it 'can substitute check command tokens with attributes and execute it' do
     async_wrapper do
       result_queue do |queue|
