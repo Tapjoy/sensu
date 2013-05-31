@@ -287,7 +287,7 @@ module Sensu
           if status == 0
             block.call(output)
           else
-            on_error.call('non-zero exit status (' + status.to_s + '): ' + output)
+            on_error.call('non-zero exit status (' + status.to_s + '): ' + output.to_s)
           end
         end
       when @extensions.mutator_exists?(mutator_name)
@@ -299,7 +299,7 @@ module Sensu
             @logger.error('mutator error', {
               :event => event,
               :extension => extension,
-              :error => 'non-zero exit status (' + status.to_s + '): ' + output
+              :error => 'non-zero exit status (' + status.to_s + '): ' + output.to_s
             })
           end
         end
