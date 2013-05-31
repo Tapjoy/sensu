@@ -171,7 +171,7 @@ module Sensu
                                                end
             rescue => error
               check[:output] = 'Unexpected error: ' + error.to_s
-              check[:status] = 2
+              check[:status] = 3
             end
             check[:duration] = ('%.3f' % (Time.now.to_f - started)).to_f
             check
