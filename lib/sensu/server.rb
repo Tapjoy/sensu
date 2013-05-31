@@ -581,7 +581,8 @@ module Sensu
     def determine_stale_clients
       @logger.info('determining stale clients')
       @redis.smembers('clients') do |clients|
-          time = Time.now.to_i
+        time = Time.now.to_i
+        clients.each do |client_name|
           client_key = "client:#{client_name}"
           @redis.get(client_key) do |client_json|
             begin
