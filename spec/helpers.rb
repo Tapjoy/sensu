@@ -15,8 +15,13 @@ module Helpers
   end
 
   def setup_redis
-    @redis = EM::Protocols::Redis.connect
-    @redis
+    begin
+      @redis = EM::Protocols::Redis.connect
+      @redis
+    rescue => e
+      @redis = nil
+      raise "Redis needs to be running locally!"
+    end
   end
 
   def redis
@@ -24,9 +29,13 @@ module Helpers
   end
 
   def setup_amq
-    rabbitmq = AMQP.connect
-    @amq = AMQP::Channel.new(rabbitmq)
-    @amq
+    begin
+      rabbitmq = AMQP.connect
+      @amq = AMQP::Channel.new(rabbitmq)
+      @amq
+    rescue
+      raise "Rabbit needs to be running locally!"
+    end
   end
 
   def amq
@@ -100,7 +109,7 @@ module Helpers
   def check_template
     {
       :name => 'foobar',
-      :command => 'echo -n WARNING && exit 1',
+      :command => 'echo WARNING && exit 1',
       :issued => epoch
     }
   end
@@ -143,15 +152,19 @@ module Helpers
     if request_options[:body].is_a?(Hash) || request_options[:body].is_a?(Array)
       request_options[:body] = Oj.dump(request_options[:body])
     end
-    http = EM::HttpRequest.new('http://localhost:4567' + uri).send(method, request_options)
-    http.callback do
-      body = case
-      when http.response.empty?
-        http.response
-      else
-        Oj.load(http.response)
+    begin
+      http = EM::HttpRequest.new('http://localhost:4567'  uri).send(method, request_options)
+      http.callback do
+        body = case
+        when http.response.empty?
+          http.response
+        else
+          Oj.load(http.response)
+        end
+        block.call(http, body)
       end
-      block.call(http, body)
+    rescue
+      raise "Rabbit needs to be running locally!"
     end
   end
 
