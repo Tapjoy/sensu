@@ -111,6 +111,21 @@ describe 'Sensu::Client' do
     end
   end
 
+  it 'can substitute check command tokens with settings prefix with attributes in full settings and execute it' do
+    async_wrapper do
+      @client.setup_rabbitmq
+      check = check_template
+      check[:command] = 'echo -n :::settings.api.port:::'
+      @client.execute_check_command(check)
+      amq.queue('results').subscribe do |headers, payload|
+        result = Oj.load(payload)
+        result[:client].should eq('i-424242')
+        result[:check][:output].should include('4567')
+        async_done
+      end
+    end
+  end
+
   it 'can setup subscriptions' do
     async_wrapper do
       @client.setup_rabbitmq
