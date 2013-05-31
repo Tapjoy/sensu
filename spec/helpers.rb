@@ -153,7 +153,7 @@ module Helpers
       request_options[:body] = Oj.dump(request_options[:body])
     end
     begin
-      http = EM::HttpRequest.new('http://localhost:4567'  uri).send(method, request_options)
+      http = EM::HttpRequest.new('http://localhost:4567' + uri).send(method, request_options)
       http.callback do
         body = case
         when http.response.empty?
