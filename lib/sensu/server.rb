@@ -71,11 +71,11 @@ module Sensu
       end
       @rabbitmq.after_reconnect do
         @logger.info('reconnected to rabbitmq')
-        @amq.prefetch(1)
+        @amq.prefetch(@settings[:rabbitmq][:prefetch] || 1)
         resume
       end
       @amq = @rabbitmq.channel
-      @amq.prefetch(1)
+      @amq.prefetch(@settings[:rabbitmq][:prefetch] || 1)
     end
 
     def setup_keepalives
@@ -287,7 +287,7 @@ module Sensu
           if status == 0
             block.call(output)
           else
-            on_error.call('non-zero exit status (' + status.to_s + '): ' + output)
+            on_error.call('non-zero exit status (' + status.to_s + '): ' + output.to_s)
           end
         end
       when @extensions.mutator_exists?(mutator_name)
@@ -299,7 +299,7 @@ module Sensu
             @logger.error('mutator error', {
               :event => event,
               :extension => extension,
-              :error => 'non-zero exit status (' + status.to_s + '): ' + output
+              :error => 'non-zero exit status (' + status.to_s + '): ' + output.to_s
             })
           end
         end
@@ -581,27 +581,32 @@ module Sensu
     def determine_stale_clients
       @logger.info('determining stale clients')
       @redis.smembers('clients') do |clients|
-        clients.each do |client_name|
-          @redis.get('client:' + client_name) do |client_json|
-            client = Oj.load(client_json)
-            check = {
-              :name => 'keepalive',
-              :issued => Time.now.to_i,
-              :executed => Time.now.to_i
-            }
-            time_since_last_keepalive = Time.now.to_i - client[:timestamp]
-            case
-            when time_since_last_keepalive >= 180
-              check[:output] = 'No keep-alive sent from client in over 180 seconds'
-              check[:status] = 2
-            when time_since_last_keepalive >= 120
-              check[:output] = 'No keep-alive sent from client in over 120 seconds'
-              check[:status] = 1
-            else
-              check[:output] = 'Keep-alive sent from client less than 120 seconds ago'
-              check[:status] = 0
+          time = Time.now.to_i
+          client_key = "client:#{client_name}"
+          @redis.get(client_key) do |client_json|
+            begin
+              client = Oj.load(client_json.to_s)
+              check = {
+                :name => 'keepalive',
+                :issued => time,
+                :executed => time
+              }
+              time_since_last_keepalive = time - client[:timestamp]
+              case
+              when time_since_last_keepalive >= 180
+                check[:output] = 'No keep-alive sent from client in over 180 seconds'
+                check[:status] = 2
+              when time_since_last_keepalive >= 120
+                check[:output] = 'No keep-alive sent from client in over 120 seconds'
+                check[:status] = 1
+              else
+                check[:output] = 'Keep-alive sent from client less than 120 seconds ago'
+                check[:status] = 0
+              end
+              publish_result(client, check)
+            rescue Oj::ParseError => e
+              @logger.warn("Unable to parse client entry #{client_key.inspect} : #{client_json.inspect} : #{e}")
             end
-            publish_result(client, check)
           end
         end
       end
