@@ -94,7 +94,7 @@ module Sensu
           config = Oj.load(contents)
           merged = deep_merge(@settings, config)
           unless @loaded_files.empty?
-            @logger.warn('config file applied changes', {
+            @logger.debug('config file applied changes', {
               :config_file => file,
               :changes => deep_diff(@settings, merged)
             })
