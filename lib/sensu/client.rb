@@ -100,9 +100,7 @@ module Sensu
     # if the command is a ruby script it is around 20 times faster to fork the client
     # process than to sh -c ruby the script and it doesn't spike the CPU nearly as much
     # check_timeout is set by configuring check[:timeout] in the check json
-    def execute_with_ruby_fork(command, check_timeout = nil)
-      check_timeout ||= 60
-
+    def execute_with_ruby_fork(command, check_timeout)
       @logger.debug('attempting to execute command in ruby fork', {
         :command => command
       })
@@ -164,6 +162,7 @@ module Sensu
             })
             started = Time.now.to_f
             begin
+              check[:timeout] ||= 60
               check[:output], check[:status] = if fork_ruby_check?(check)
                                                  execute_with_ruby_fork(command, check[:timeout])
                                                else
