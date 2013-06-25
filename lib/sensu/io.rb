@@ -36,7 +36,7 @@ module Sensu
         rescue Timeout::Error
           kill_process_group(child.pid)
           wait_on_process_group(child.pid)
-          ['Execution timed out', 2]
+          ["Unexpected error: execution expired [#{timeout}s]\n", 3]
         rescue => error
           kill_process_group(child.pid)
           wait_on_process_group(child.pid)
