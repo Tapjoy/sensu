@@ -82,7 +82,7 @@ module Sensu
         token_fields = token.split('.')
         config = @settings[:client]
         # if token is :::settings.something::: look in full settings hash
-        if token_fields[0] == 'settings' 
+        if token_fields[0] == 'settings'
           config = @settings
           token_fields = token_fields[1..-1]
         end
@@ -106,7 +106,7 @@ module Sensu
       })
 
       # IO.popen does not run at_exit handlers which is what sensu-plugins use to run scripts
-      # So we have to do the output capture manually.
+      # So we have to fork and load which does run at_exit and do the output capture manually.
       # child in/out is used to read output from the fork
       child_in, child_out = ::IO.pipe
       child_pid = Kernel.fork do
@@ -116,29 +116,33 @@ module Sensu
         # Use the piped stream so that the parent process can read the output
         STDOUT.reopen(child_out)
 
-        # Run the command
+        # Run the command for the check
         file, *args = Shellwords.split(command)
         ARGV.replace(args)
         load(file, true)
       end
 
       # Kill the process if it runs for too long (ignore output from kill command)
-      ::Process.detach(spawn("sleep #{check_timeout} && kill -9 #{child_pid} > /dev/null 2>&1"))
+      # Originally used ruby Timeout for this but it was a bugridden disaster. This works all the time.
+      # The echo is so we can see what each sleep is watching for in ps output
+      ::Process.detach(spawn("echo 'Timeout monitor for check \"#{command}\"' ; sleep #{check_timeout} && kill -9 #{child_pid} > /dev/null 2>&1"))
 
       # Unused streams
       child_out.close
 
-      # Wait for the child to complete
-      pid, status = ::Process.wait2(child_pid)
+      # Read output before waiting on child. If the child output is greater than 57K it will block
+      # writing to the pipe unless someone reads from it and will hang. If we read first we consume the output
+      # read returns when the process exits and we'll get the status afterwards.
       output = child_in.read
+      _, status = ::Process.wait2(child_pid)
 
       # Remaining unused streams
       child_in.close
 
       exit_status = status.exitstatus || begin
         # Lack of an exit status means we killed it
-        output = "#{output}Unexpected error: execution expired [#{check_timeout}s]\n"
-        3
+        output = "Check execution timed out after #{check_timeout} seconds\nOutput produced before check was killed:\n\n#{output}"
+        2
       end
       [output, exit_status]
     end
