@@ -125,7 +125,7 @@ module Sensu
       # Kill the process if it runs for too long (ignore output from kill command)
       # Originally used ruby Timeout for this but it was a bugridden disaster. This works all the time.
       # The echo is so we can see what each sleep is watching for in ps output
-      ::Process.detach(spawn("echo 'Timeout monitor for check \"#{command}\"' ; sleep #{check_timeout} && kill -9 #{child_pid} > /dev/null 2>&1"))
+      ::Process.detach(spawn("echo 'Timeout monitor for check \"#{command}\"' > /dev/null ;sleep #{check_timeout} && kill -9 #{child_pid} > /dev/null 2>&1"))
 
       # Unused streams
       child_out.close
