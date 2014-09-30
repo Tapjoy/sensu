@@ -142,7 +142,7 @@ module Sensu
       exit_status = status.exitstatus || begin
         # Lack of an exit status means we killed it
         output = "Check execution timed out after #{check_timeout} seconds\nOutput produced before check was killed:\n\n#{output}"
-        2
+        3
       end
       [output, exit_status]
     end
