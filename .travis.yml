@@ -8,6 +8,3 @@ services:
   - redis
 env:
   - RACK_ENV=development
-notifications:
-  irc:
-    - "irc.freenode.net#sensu"
