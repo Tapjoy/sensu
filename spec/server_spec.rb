@@ -30,12 +30,12 @@ describe 'Sensu::Server' do
       keepalive = client_template
       keepalive[:timestamp] = epoch
       redis.flushdb do
-        amq.queue('keepalives').publish(keepalive.to_json)
+        amq.direct('keepalives').publish(Oj.dump(keepalive))
         timer(1) do
           redis.sismember('clients', 'i-424242') do |exists|
             exists.should be_true
             redis.get('client:i-424242') do |client_json|
-              client = JSON.parse(client_json, :symbolize_names => true)
+              client = Oj.load(client_json)
               client.should eq(keepalive)
               async_done
             end
@@ -45,39 +45,40 @@ describe 'Sensu::Server' do
     end
   end
 
-  it 'can determine if a check is subdued' do
-    @server.check_subdued?(Hash.new, :handler).should be_false
+  it 'can determine if an action is subdued' do
+    @server.action_subdued?(Hash.new).should be_false
     check = {
       :subdue => {
         :begin => (Time.now - 3600).strftime('%l:00 %p').strip,
         :end => (Time.now + 3600).strftime('%l:00 %p').strip
       }
     }
-    @server.check_subdued?(check, :handler).should be_true
-    @server.check_subdued?(check, :publisher).should be_false
-    check[:subdue][:at] = :publisher
-    @server.check_subdued?(check, :publisher).should be_true
+    @server.action_subdued?(check).should be_false
+    handler = Hash.new
+    @server.action_subdued?(check, handler).should be_true
+    check[:subdue][:at] = 'publisher'
+    @server.action_subdued?(check).should be_true
     check = {
       :subdue => {
         :begin => (Time.now + 3600).strftime('%l:00 %p').strip,
         :end => (Time.now + 7200).strftime('%l:00 %p').strip
       }
     }
-    @server.check_subdued?(check, :handler).should be_false
+    @server.action_subdued?(check, handler).should be_false
     check = {
       :subdue => {
         :begin => (Time.now - 3600).strftime('%l:00 %p').strip,
         :end => (Time.now - 7200).strftime('%l:00 %p').strip
       }
     }
-    @server.check_subdued?(check, :handler).should be_true
+    @server.action_subdued?(check, handler).should be_true
     check = {
       :subdue => {
         :begin => (Time.now + 3600).strftime('%l:00 %p').strip,
         :end => (Time.now - 7200).strftime('%l:00 %p').strip
       }
     }
-    @server.check_subdued?(check, :handler).should be_false
+    @server.action_subdued?(check, handler).should be_false
     check = {
       :subdue => {
         :days => [
@@ -86,7 +87,7 @@ describe 'Sensu::Server' do
         ]
       }
     }
-    @server.check_subdued?(check, :handler).should be_true
+    @server.action_subdued?(check, handler).should be_true
     check = {
       :subdue => {
         :days => [
@@ -95,7 +96,7 @@ describe 'Sensu::Server' do
         ]
       }
     }
-    @server.check_subdued?(check, :handler).should be_false
+    @server.action_subdued?(check, handler).should be_false
     check = {
       :subdue => {
         :days => %w[sunday monday tuesday wednesday thursday friday saturday],
@@ -107,7 +108,7 @@ describe 'Sensu::Server' do
         ]
       }
     }
-    @server.check_subdued?(check, :handler).should be_true
+    @server.action_subdued?(check, handler).should be_true
     check = {
       :subdue => {
         :days => %w[sunday monday tuesday wednesday thursday friday saturday],
@@ -119,7 +120,36 @@ describe 'Sensu::Server' do
         ]
       }
     }
-    @server.check_subdued?(check, :handler).should be_false
+    @server.action_subdued?(check, handler).should be_false
+    check = Hash.new
+    handler = {
+      :subdue => {
+        :begin => (Time.now - 3600).strftime('%l:00 %p').strip,
+        :end => (Time.now + 3600).strftime('%l:00 %p').strip
+      }
+    }
+    @server.action_subdued?(check, handler).should be_true
+    check = {
+      :subdue => {
+        :begin => (Time.now - 3600).strftime('%l:00 %p').strip,
+        :end => (Time.now + 3600).strftime('%l:00 %p').strip
+      }
+    }
+    @server.action_subdued?(check, handler).should be_true
+    check = {
+      :subdue => {
+        :begin => (Time.now + 3600).strftime('%l:00 %p').strip,
+        :end => (Time.now + 7200).strftime('%l:00 %p').strip
+      }
+    }
+    @server.action_subdued?(check, handler).should be_true
+    handler = {
+      :subdue => {
+        :begin => (Time.now + 3600).strftime('%l:00 %p').strip,
+        :end => (Time.now + 7200).strftime('%l:00 %p').strip
+      }
+    }
+    @server.action_subdued?(check, handler).should be_false
   end
 
   it 'can determine if filter attributes match an event' do
@@ -171,15 +201,15 @@ describe 'Sensu::Server' do
     ]
     @server.event_handlers(event).should eq(expected)
     event[:client][:environment] = 'development'
-    expected.push({
+    expected << {
       :name => 'filtered',
       :type => 'pipe',
       :command => 'cat > /tmp/sensu_event',
       :filter => 'development'
-    })
+    }
     @server.event_handlers(event).should eq(expected)
     event[:check][:status] = 2
-    expected.push({
+    expected << {
       :name => 'severities',
       :type => 'pipe',
       :command => 'cat > /tmp/sensu_event',
@@ -187,7 +217,7 @@ describe 'Sensu::Server' do
         'critical',
         'unknown'
       ]
-    })
+    }
     @server.event_handlers(event).should eq(expected)
     event[:check][:status] = 0
     event[:action] = :resolve
@@ -226,13 +256,25 @@ describe 'Sensu::Server' do
   it 'can mutate event data' do
     async_wrapper do
       event = event_template
+      @server.mutate_event_data('unknown', event) do |event_data|
+        raise 'should never get here'
+      end
+      @server.mutate_event_data('explode', event) do |event_data|
+        raise 'should never get here'
+      end
+      @server.mutate_event_data('fail', event) do |event_data|
+        raise 'should never get here'
+      end
       @server.mutate_event_data(nil, event) do |event_data|
-        event_data.should eq(event.to_json)
+        event_data.should eq(Oj.dump(event))
         @server.mutate_event_data('only_check_output', event) do |event_data|
           event_data.should eq('WARNING')
           @server.mutate_event_data('tag', event) do |event_data|
-            JSON.parse(event_data).should include('mutated')
-            async_done
+            Oj.load(event_data).should include(:mutated)
+            @server.mutate_event_data('settings', event) do |event_data|
+              event_data.should eq('true')
+              async_done
+            end
           end
         end
       end
@@ -257,7 +299,7 @@ describe 'Sensu::Server' do
       event = event_template
       event[:check][:handler] = 'tcp'
       EM::start_server('127.0.0.1', 1234, Helpers::TestServer) do |server|
-        server.expected = event.to_json
+        server.expected = Oj.dump(event)
       end
       @server.handle_event(event)
     end
@@ -268,7 +310,7 @@ describe 'Sensu::Server' do
       event = event_template
       event[:check][:handler] = 'udp'
       EM::open_datagram_socket('127.0.0.1', 1234, Helpers::TestServer) do |server|
-        server.expected = event.to_json
+        server.expected = Oj.dump(event)
       end
       @server.handle_event(event)
     end
@@ -279,12 +321,12 @@ describe 'Sensu::Server' do
       @server.setup_rabbitmq
       event = event_template
       event[:check][:handler] = 'amqp'
-      amq.direct('events') do |exchange, declare_ok|
-        binding = amq.queue('', :auto_delete => true).bind('events') do
+      amq.direct('events') do
+        queue = amq.queue('', :auto_delete => true).bind('events') do
           @server.handle_event(event)
         end
-        binding.subscribe do |payload|
-          payload.should eq(event.to_json)
+        queue.subscribe do |payload|
+          payload.should eq(Oj.dump(event))
           async_done
         end
       end
@@ -314,7 +356,7 @@ describe 'Sensu::Server' do
           result[:check][:status] = index
           @server.aggregate_result(result)
         end
-        timer(1) do
+        timer(2) do
           result_set = 'foobar:' + timestamp.to_s
           redis.sismember('aggregates', 'foobar') do |exists|
             exists.should be_true
@@ -345,7 +387,7 @@ describe 'Sensu::Server' do
       @server.setup_redis
       redis.flushdb do
         client = client_template
-        redis.set('client:i-424242', client.to_json) do
+        redis.set('client:i-424242', Oj.dump(client)) do
           26.times do |index|
             result = result_template
             result[:check][:low_flap_threshold] = 5
@@ -357,7 +399,7 @@ describe 'Sensu::Server' do
             redis.llen('history:i-424242:foobar') do |length|
               length.should eq(21)
               redis.hget('events:i-424242', 'foobar') do |event_json|
-                event = JSON.parse(event_json, :symbolize_names => true)
+                event = Oj.load(event_json)
                 event[:flapping].should be_true
                 event[:occurrences].should be_within(2).of(1)
                 async_done
@@ -376,12 +418,12 @@ describe 'Sensu::Server' do
       @server.setup_results
       redis.flushdb do
         client = client_template
-        redis.set('client:i-424242', client.to_json) do
+        redis.set('client:i-424242', Oj.dump(client)) do
           result = result_template
-          amq.queue('results').publish(result.to_json)
+          amq.direct('results').publish(Oj.dump(result))
           timer(1) do
             redis.hget('events:i-424242', 'foobar') do |event_json|
-              event = JSON.parse(event_json, :symbolize_names => true)
+              event = Oj.load(event_json)
               event[:status].should eq(1)
               event[:occurrences].should eq(1)
               async_done
@@ -395,14 +437,14 @@ describe 'Sensu::Server' do
   it 'can publish check requests' do
     async_wrapper do
       @server.setup_rabbitmq
-      amq.fanout('test') do |exchange, declare_ok|
+      amq.fanout('test') do
         check = check_template
         check[:subscribers] = ['test']
-        binding = amq.queue('', :auto_delete => true).bind('test') do
+        queue = amq.queue('', :auto_delete => true).bind('test') do
           @server.publish_check_request(check)
         end
-        binding.subscribe do |payload|
-          check_request = JSON.parse(payload, :symbolize_names => true)
+        queue.subscribe do |payload|
+          check_request = Oj.load(payload)
           check_request[:name].should eq('foobar')
           check_request[:command].should eq('echo -n WARNING && exit 1')
           check_request[:issued].should be_within(10).of(epoch)
@@ -416,11 +458,15 @@ describe 'Sensu::Server' do
     async_wrapper do
       @server.setup_rabbitmq
       @server.setup_publisher
-      amq.fanout('test') do |exchange, declare_ok|
+      amq.fanout('test') do
+        expected = ['tokens', 'merger', 'sensu_cpu_time']
         amq.queue('', :auto_delete => true).bind('test').subscribe do |payload|
-          check_request = JSON.parse(payload, :symbolize_names => true)
+          check_request = Oj.load(payload)
           check_request[:issued].should be_within(10).of(epoch)
-          async_done
+          expected.delete(check_request[:name]).should_not be_nil
+          if expected.empty?
+            async_done
+          end
         end
       end
     end
@@ -428,15 +474,17 @@ describe 'Sensu::Server' do
 
   it 'can send a check result' do
     async_wrapper do
-      @server.setup_rabbitmq
-      client = client_template
-      check = result_template[:check]
-      @server.publish_result(client, check)
-      amq.queue('results').subscribe do |headers, payload|
-        result = JSON.parse(payload, :symbolize_names => true)
-        result[:client].should eq('i-424242')
-        result[:check][:name].should eq('foobar')
-        async_done
+      result_queue do |queue|
+        @server.setup_rabbitmq
+        client = client_template
+        check = result_template[:check]
+        @server.publish_result(client, check)
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          result[:check][:name].should eq('foobar')
+          async_done
+        end
       end
     end
   end
@@ -448,22 +496,25 @@ describe 'Sensu::Server' do
       @server.setup_results
       client1 = client_template
       client1[:name] = 'foo'
-      client1[:timestamp] = epoch - 120
+      client1[:timestamp] = epoch - 60
+      client1[:keepalive][:handler] = 'debug'
       client2 = client_template
       client2[:name] = 'bar'
-      client2[:timestamp] = epoch - 180
-      redis.set('client:foo', client1.to_json) do
+      client2[:timestamp] = epoch - 120
+      redis.set('client:foo', Oj.dump(client1)) do
         redis.sadd('clients', 'foo') do
-          redis.set('client:bar', client2.to_json) do
+          redis.set('client:bar', Oj.dump(client2)) do
             redis.sadd('clients', 'bar') do
               @server.determine_stale_clients
               timer(1) do
                 redis.hget('events:foo', 'keepalive') do |event_json|
-                  event = JSON.parse(event_json, :symbolize_names => true)
+                  event = Oj.load(event_json)
                   event[:status].should eq(1)
+                  event[:handlers].should eq(['debug'])
                   redis.hget('events:bar', 'keepalive') do |event_json|
-                    event = JSON.parse(event_json, :symbolize_names => true)
+                    event = Oj.load(event_json)
                     event[:status].should eq(2)
+                    event[:handlers].should eq(['default'])
                     async_done
                   end
                 end
@@ -480,7 +531,7 @@ describe 'Sensu::Server' do
       @server.setup_redis
       redis.flushdb do
         client = client_template
-        redis.set('client:i-424242', client.to_json) do
+        redis.set('client:i-424242', Oj.dump(client)) do
           timestamp = epoch - 26
           26.times do |index|
             result = result_template

@@ -12,19 +12,29 @@ describe 'Sensu::API' do
       client = client_template
       client[:timestamp] = epoch
       redis.flushdb do
-        redis.set('client:i-424242', client.to_json) do
+        redis.set('client:i-424242', Oj.dump(client)) do
           redis.sadd('clients', 'i-424242') do
-            redis.hset('events:i-424242', 'test', {
+            redis.hset('events:i-424242', 'test', Oj.dump(
               :output => 'CRITICAL',
               :status => 2,
               :issued => Time.now.to_i,
               :flapping => false,
               :occurrences => 1
-            }.to_json) do
+            )) do
               redis.set('stash:test/test', '{"key": "value"}') do
                 redis.sadd('stashes', 'test/test') do
-                  @redis = nil
-                  async_done
+                  redis.sadd('history:i-424242', 'success') do
+                    redis.sadd('history:i-424242', 'fail') do
+                      redis.set('execution:i-424242:success', 1363224805) do
+                        redis.set('execution:i-424242:fail', 1363224806) do
+                          redis.rpush('history:i-424242:success', 0) do
+                            @redis = nil
+                            async_done
+                          end
+                        end
+                      end
+                    end
+                  end
                 end
               end
             end
@@ -39,13 +49,30 @@ describe 'Sensu::API' do
       api_request('/info') do |http, body|
         http.response_header.status.should eq(200)
         body[:sensu][:version].should eq(Sensu::VERSION)
-        body[:health][:redis].should eq('ok')
-        body[:health][:rabbitmq].should eq('ok')
+        body[:redis][:connected].should be_true
+        body[:rabbitmq][:connected].should be_true
         body[:rabbitmq][:keepalives][:messages].should be_kind_of(Integer)
         body[:rabbitmq][:keepalives][:consumers].should be_kind_of(Integer)
         body[:rabbitmq][:results][:messages].should be_kind_of(Integer)
         body[:rabbitmq][:results][:consumers].should be_kind_of(Integer)
         async_done
+      end
+    end
+  end
+
+  it 'can provide connection and queue monitoring' do
+    api_test do
+      api_request('/health?consumers=0&messages=1000') do |http, body|
+        http.response_header.status.should eq(204)
+        body.should be_empty
+        api_request('/health?consumers=1000') do |http, body|
+          http.response_header.status.should eq(503)
+          body.should be_empty
+          api_request('/health?consumers=1000&messages=1000') do |http, body|
+            http.response_header.status.should eq(503)
+            async_done
+          end
+        end
       end
     end
   end
@@ -135,15 +162,17 @@ describe 'Sensu::API' do
 
   it 'can delete an event' do
     api_test do
-      api_request('/event/i-424242/test', :delete) do |http, body|
-        http.response_header.status.should eq(202)
-        body.should be_empty
-        amq.queue('results').subscribe do |headers, payload|
-          result = JSON.parse(payload, :symbolize_names => true)
-          result[:client].should eq('i-424242')
-          result[:check][:name].should eq('test')
-          result[:check][:status].should eq(0)
-          async_done
+      result_queue do |queue|
+        api_request('/event/i-424242/test', :delete) do |http, body|
+          http.response_header.status.should eq(202)
+          body.should include(:issued)
+          queue.subscribe do |payload|
+            result = Oj.load(payload)
+            result[:client].should eq('i-424242')
+            result[:check][:name].should eq('test')
+            result[:check][:status].should eq(0)
+            async_done
+          end
         end
       end
     end
@@ -161,21 +190,23 @@ describe 'Sensu::API' do
 
   it 'can resolve an event' do
     api_test do
-      options = {
-        :body => {
-          :client => 'i-424242',
-          :check => 'test'
-        }.to_json
-      }
-      api_request('/resolve', :post, options) do |http, body|
-        http.response_header.status.should eq(202)
-        body.should be_empty
-        amq.queue('results').subscribe do |headers, payload|
-          result = JSON.parse(payload, :symbolize_names => true)
-          result[:client].should eq('i-424242')
-          result[:check][:name].should eq('test')
-          result[:check][:status].should eq(0)
-          async_done
+      result_queue do |queue|
+        options = {
+          :body => {
+            :client => 'i-424242',
+            :check => 'test'
+          }
+        }
+        api_request('/resolve', :post, options) do |http, body|
+          http.response_header.status.should eq(202)
+          body.should include(:issued)
+          queue.subscribe do |payload|
+            result = Oj.load(payload)
+            result[:client].should eq('i-424242')
+            result[:check][:name].should eq('test')
+            result[:check][:status].should eq(0)
+            async_done
+          end
         end
       end
     end
@@ -187,7 +218,7 @@ describe 'Sensu::API' do
         :body => {
           :client => 'i-424242',
           :check => 'nonexistent'
-        }.to_json
+        }
       }
       api_request('/resolve', :post, options) do |http, body|
         http.response_header.status.should eq(404)
@@ -215,7 +246,7 @@ describe 'Sensu::API' do
       options = {
         :body => {
           :client => 'i-424242'
-        }.to_json
+        }
       }
       api_request('/resolve', :post, options) do |http, body|
         http.response_header.status.should eq(400)
@@ -249,11 +280,26 @@ describe 'Sensu::API' do
     end
   end
 
+  it 'can request check history for a client' do
+    api_test do
+      api_request('/clients/i-424242/history') do |http, body|
+        http.response_header.status.should eq(200)
+        body.should be_kind_of(Array)
+        body.should have(1).items
+        body[0][:check].should eq('success')
+        body[0][:history].should be_kind_of(Array)
+        body[0][:last_execution].should eq(1363224805)
+        body[0][:last_status].should eq(0)
+        async_done
+      end
+    end
+  end
+
   it 'can delete a client' do
     api_test do
       api_request('/client/i-424242', :delete) do |http, body|
         http.response_header.status.should eq(202)
-        body.should be_empty
+        body.should include(:issued)
         async_done
       end
     end
@@ -299,11 +345,11 @@ describe 'Sensu::API' do
           :subscribers => [
             'test'
           ]
-        }.to_json
+        }
       }
       api_request('/request', :post, options) do |http, body|
-        http.response_header.status.should eq(201)
-        body.should be_empty
+        http.response_header.status.should eq(202)
+        body.should include(:issued)
         async_done
       end
     end
@@ -315,7 +361,7 @@ describe 'Sensu::API' do
         :body => {
           :check => 'tokens',
           :subscribers => 'invalid'
-        }.to_json
+        }
       }
       api_request('/request', :post, options) do |http, body|
         http.response_header.status.should eq(400)
@@ -329,10 +375,8 @@ describe 'Sensu::API' do
     api_test do
       options = {
         :body => {
-          :subscribers => [
-            'test'
-          ]
-        }.to_json
+          :check => 'tokens'
+        }
       }
       api_request('/request', :post, options) do |http, body|
         http.response_header.status.should eq(400)
@@ -346,8 +390,11 @@ describe 'Sensu::API' do
     api_test do
       options = {
         :body => {
-          :check => 'nonexistent'
-        }.to_json
+          :check => 'nonexistent',
+          :subscribers => [
+            'test'
+          ]
+        }
       }
       api_request('/request', :post, options) do |http, body|
         http.response_header.status.should eq(404)
@@ -361,15 +408,37 @@ describe 'Sensu::API' do
     api_test do
       options = {
         :body => {
-          :key => 'value'
-        }.to_json
+          :path => 'tester',
+          :content => {
+            :key => 'value'
+          }
+        }
       }
-      api_request('/stash/tester', :post, options) do |http, body|
+      api_request('/stashes', :post, options) do |http, body|
         http.response_header.status.should eq(201)
-        body.should be_empty
+        body.should include(:path)
+        body[:path].should eq('tester')
         redis.get('stash:tester') do |stash_json|
-          stash = JSON.parse(stash_json, :symbolize_names => true)
+          stash = Oj.load(stash_json)
           stash.should eq({:key => 'value'})
+          async_done
+        end
+      end
+    end
+  end
+
+  it 'can not create a stash when missing data' do
+    api_test do
+      options = {
+        :body => {
+          :path => 'tester'
+        }
+      }
+      api_request('/stashes', :post, options) do |http, body|
+        http.response_header.status.should eq(400)
+        body.should be_empty
+        redis.exists('stash:tester') do |exists|
+          exists.should be_false
           async_done
         end
       end
@@ -379,12 +448,50 @@ describe 'Sensu::API' do
   it 'can not create a non-json stash' do
     api_test do
       options = {
-        :body => 'should fail'
+        :body => {
+          :path => 'tester',
+          :content => 'value'
+        }
       }
-      api_request('/stash/foobar', :post, options) do |http, body|
+      api_request('/stashes', :post, options) do |http, body|
         http.response_header.status.should eq(400)
         body.should be_empty
-        redis.exists('stash:foobar') do |exists|
+        redis.exists('stash:tester') do |exists|
+          exists.should be_false
+          async_done
+        end
+      end
+    end
+  end
+
+  it 'can create a stash with id (path)' do
+    api_test do
+      options = {
+        :body => {
+          :key => 'value'
+        }
+      }
+      api_request('/stash/tester', :post, options) do |http, body|
+        http.response_header.status.should eq(201)
+        body.should include(:path)
+        redis.get('stash:tester') do |stash_json|
+          stash = Oj.load(stash_json)
+          stash.should eq({:key => 'value'})
+          async_done
+        end
+      end
+    end
+  end
+
+  it 'can not create a non-json stash with id' do
+    api_test do
+      options = {
+        :body => 'should fail'
+      }
+      api_request('/stash/tester', :post, options) do |http, body|
+        http.response_header.status.should eq(400)
+        body.should be_empty
+        redis.exists('stash:tester') do |exists|
           exists.should be_false
           async_done
         end
@@ -413,30 +520,14 @@ describe 'Sensu::API' do
     end
   end
 
-  it 'can provide a list of stashes' do
+  it 'can provide multiple stashes' do
     api_test do
       api_request('/stashes') do |http, body|
         http.response_header.status.should eq(200)
         body.should be_kind_of(Array)
-        body.should include('test/test')
-        async_done
-      end
-    end
-  end
-
-  it 'can provide multiple stashes' do
-    api_test do
-      options = {
-        :body => [
-          'test/test',
-          'nonexistent'
-        ].to_json
-      }
-      api_request('/stashes', :post, options) do |http, body|
-        http.response_header.status.should eq(200)
-        body.should be_kind_of(Hash)
-        body.should have_key(:'test/test')
-        body[:'test/test'].should eq({:key => 'value'})
+        body[0].should be_kind_of(Hash)
+        body[0][:path].should eq('test/test')
+        body[0][:content].should eq({:key => 'value'})
         async_done
       end
     end
@@ -487,16 +578,24 @@ describe 'Sensu::API' do
     api_test do
       server = Sensu::Server.new(options)
       server.setup_redis
-      result = result_template
       timestamp = epoch
-      result[:timestamp] = timestamp
-      server.aggregate_result(result)
+      3.times do |index|
+        result = result_template
+        result[:check][:issued] = timestamp + index
+        server.aggregate_result(result)
+      end
       timer(1) do
-        api_request('/aggregates/foobar?limit=1') do |http, body|
+        api_request('/aggregates/foobar') do |http, body|
           body.should be_kind_of(Array)
-          body.should have(1).items
-          body.should include(timestamp.to_s)
-          async_done
+          body.should have(3).items
+          body.should include(timestamp)
+          api_request('/aggregates/foobar?limit=1') do |http, body|
+            body.should have(1).items
+            api_request('/aggregates/foobar?limit=1&age=30') do |http, body|
+              body.should be_empty
+              async_done
+            end
+          end
         end
       end
     end

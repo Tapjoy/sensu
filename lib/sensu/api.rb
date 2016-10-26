@@ -2,6 +2,7 @@ require File.join(File.dirname(__FILE__), 'base')
 require File.join(File.dirname(__FILE__), 'redis')
 
 gem 'thin', '1.5.0'
+gem 'sinatra', '1.3.5'
 gem 'async_sinatra', '1.0.0'
 
 require 'thin'
@@ -75,7 +76,8 @@ module Sensu
         setup_redis
         setup_rabbitmq
         Thin::Logging.silent = true
-        Thin::Server.start(self, $settings[:api][:port])
+        bind = $settings[:api][:bind] || '0.0.0.0'
+        Thin::Server.start(bind, $settings[:api][:port], self)
       end
 
       def stop
@@ -87,8 +89,15 @@ module Sensu
       end
 
       def trap_signals
-        %w[INT TERM].each do |signal|
+        $signals = Array.new
+        STOP_SIGNALS.each do |signal|
           Signal.trap(signal) do
+            $signals << signal
+          end
+        end
+        EM::PeriodicTimer.new(1) do
+          signal = $signals.shift
+          if STOP_SIGNALS.include?(signal)
             $logger.warn('received signal', {
               :signal => signal
             })
@@ -128,32 +137,50 @@ module Sensu
         env['rack.input'].rewind
       end
 
-      def health_filter
-        unless $redis.connected?
-          unless env['REQUEST_PATH'] == '/info'
-            halt 500
-          end
+      def integer_parameter(parameter)
+        parameter =~ /^[0-9]+$/ ? parameter.to_i : nil
+      end
+
+      def pagination(items)
+        limit = integer_parameter(params[:limit])
+        offset = integer_parameter(params[:offset]) || 0
+        unless limit.nil?
+          headers['X-Pagination'] = Oj.dump(
+            :limit => limit,
+            :offset => offset,
+            :total => items.size
+          )
+          paginated = items.slice(offset, limit)
+          Array(paginated)
+        else
+          items
         end
       end
 
       def bad_request!
-        status 400
-        body ''
+        ahalt 400
       end
 
       def not_found!
-        status 404
-        body ''
+        ahalt 404
       end
 
-      def created!
+      def unavailable!
+        ahalt 503
+      end
+
+      def created!(response)
         status 201
-        body ''
+        body response
       end
 
-      def accepted!
+      def accepted!(response)
         status 202
-        body ''
+        body response
+      end
+
+      def issued!
+        accepted!(Oj.dump(:issued => Time.now.to_i))
       end
 
       def no_content!
@@ -162,7 +189,7 @@ module Sensu
       end
 
       def event_hash(event_json, client_name, check_name)
-        JSON.parse(event_json, :symbolize_names => true).merge(
+        Oj.load(event_json).merge(
           :client => client_name,
           :check => check_name
         )
@@ -183,14 +210,13 @@ module Sensu
         $logger.info('publishing check result', {
           :payload => payload
         })
-        $amq.queue('results').publish(payload.to_json)
+        $amq.direct('results').publish(Oj.dump(payload))
       end
     end
 
     before do
-      content_type 'application/json'
       request_log_line
-      health_filter
+      content_type 'application/json'
     end
 
     aget '/info' do
@@ -206,11 +232,11 @@ module Sensu
           :results => {
             :messages => nil,
             :consumers => nil
-          }
+          },
+          :connected => $rabbitmq.connected?
         },
-        :health => {
-          :redis => $redis.connected? ? 'ok' : 'down',
-          :rabbitmq => $rabbitmq.connected? ? 'ok' : 'down'
+        :redis => {
+          :connected => $redis.connected?
         }
       }
       if $rabbitmq.connected?
@@ -220,28 +246,56 @@ module Sensu
           $amq.queue('results').status do |messages, consumers|
             response[:rabbitmq][:results][:messages] = messages
             response[:rabbitmq][:results][:consumers] = consumers
-            body response.to_json
+            body Oj.dump(response)
           end
         end
       else
-        body response.to_json
+        body Oj.dump(response)
+      end
+    end
+
+    aget '/health' do
+      if $redis.connected? && $rabbitmq.connected?
+        healthy = Array.new
+        min_consumers = integer_parameter(params[:consumers])
+        max_messages = integer_parameter(params[:messages])
+        $amq.queue('keepalives').status do |messages, consumers|
+          if min_consumers
+            healthy << (consumers >= min_consumers)
+          end
+          if max_messages
+            healthy << (messages <= max_messages)
+          end
+          $amq.queue('results').status do |messages, consumers|
+            if min_consumers
+              healthy << (consumers >= min_consumers)
+            end
+            if max_messages
+              healthy << (messages <= max_messages)
+            end
+            healthy.all? ? no_content! : unavailable!
+          end
+        end
+      else
+        unavailable!
       end
     end
 
     aget '/clients' do
       response = Array.new
       $redis.smembers('clients') do |clients|
+        clients = pagination(clients)
         unless clients.empty?
           clients.each_with_index do |client_name, index|
             $redis.get('client:' + client_name) do |client_json|
-              response.push(JSON.parse(client_json))
+              response << Oj.load(client_json)
               if index == clients.size - 1
-                body response.to_json
+                body Oj.dump(response)
               end
             end
           end
         else
-          body response.to_json
+          body Oj.dump(response)
         end
       end
     end
@@ -256,6 +310,39 @@ module Sensu
       end
     end
 
+    aget %r{/clients/([\w\.-]+)/history$} do |client_name|
+      response = Array.new
+      $redis.smembers('history:' + client_name) do |checks|
+        unless checks.empty?
+          checks.each_with_index do |check_name, index|
+            history_key = 'history:' + client_name + ':' + check_name
+            $redis.lrange(history_key, -21, -1) do |history|
+              history.map! do |status|
+                status.to_i
+              end
+              execution_key = 'execution:' + client_name + ':' + check_name
+              $redis.get(execution_key) do |last_execution|
+                unless history.empty? || last_execution.nil?
+                  item = {
+                    :check => check_name,
+                    :history => history,
+                    :last_execution => last_execution.to_i,
+                    :last_status => history.last
+                  }
+                  response << item
+                end
+                if index == checks.size - 1
+                  body Oj.dump(response)
+                end
+              end
+            end
+          end
+        else
+          body Oj.dump(response)
+        end
+      end
+    end
+
     adelete %r{/clients?/([\w\.-]+)$} do |client_name|
       $redis.get('client:' + client_name) do |client_json|
         unless client_json.nil?
@@ -264,7 +351,7 @@ module Sensu
               resolve_event(event_hash(event_json, client_name, check_name))
             end
             EM::Timer.new(5) do
-              client = JSON.parse(client_json, :symbolize_names => true)
+              client = Oj.load(client_json)
               $logger.info('deleting client', {
                 :client => client
               })
@@ -274,11 +361,12 @@ module Sensu
               $redis.smembers('history:' + client_name) do |checks|
                 checks.each do |check_name|
                   $redis.del('history:' + client_name + ':' + check_name)
+                  $redis.del('execution:' + client_name + ':' + check_name)
                 end
                 $redis.del('history:' + client_name)
               end
             end
-            accepted!
+            issued!
           end
         else
           not_found!
@@ -287,13 +375,13 @@ module Sensu
     end
 
     aget '/checks' do
-      body $settings.checks.to_json
+      body Oj.dump($settings.checks)
     end
 
     aget %r{/checks?/([\w\.-]+)$} do |check_name|
       if $settings.check_exists?(check_name)
         response = $settings[:checks][check_name].merge(:name => check_name)
-        body response.to_json
+        body Oj.dump(response)
       else
         not_found!
       end
@@ -301,9 +389,9 @@ module Sensu
 
     apost %r{/(?:check/)?request$} do
       begin
-        post_body = JSON.parse(request.body.read, :symbolize_names => true)
+        post_body = Oj.load(request.body.read)
         check_name = post_body[:check]
-        subscribers = post_body[:subscribers] || Array.new
+        subscribers = post_body[:subscribers]
         if check_name.is_a?(String) && subscribers.is_a?(Array)
           if $settings.check_exists?(check_name)
             check = $settings[:checks][check_name]
@@ -320,16 +408,16 @@ module Sensu
               :subscribers => subscribers
             })
             subscribers.uniq.each do |exchange_name|
-              $amq.fanout(exchange_name).publish(payload.to_json)
+              $amq.fanout(exchange_name).publish(Oj.dump(payload))
             end
-            created!
+            issued!
           else
             not_found!
           end
         else
           bad_request!
         end
-      rescue JSON::ParserError, TypeError
+      rescue Oj::ParseError, TypeError
         bad_request!
       end
     end
@@ -341,15 +429,15 @@ module Sensu
           clients.each_with_index do |client_name, index|
             $redis.hgetall('events:' + client_name) do |events|
               events.each do |check_name, event_json|
-                response.push(event_hash(event_json, client_name, check_name))
+                response << event_hash(event_json, client_name, check_name)
               end
               if index == clients.size - 1
-                body response.to_json
+                body Oj.dump(response)
               end
             end
           end
         else
-          body response.to_json
+          body Oj.dump(response)
         end
       end
     end
@@ -358,9 +446,9 @@ module Sensu
       response = Array.new
       $redis.hgetall('events:' + client_name) do |events|
         events.each do |check_name, event_json|
-          response.push(event_hash(event_json, client_name, check_name))
+          response << event_hash(event_json, client_name, check_name)
         end
-        body response.to_json
+        body Oj.dump(response)
       end
     end
 
@@ -368,7 +456,7 @@ module Sensu
       $redis.hgetall('events:' + client_name) do |events|
         event_json = events[check_name]
         unless event_json.nil?
-          body event_hash(event_json, client_name, check_name).to_json
+          body Oj.dump(event_hash(event_json, client_name, check_name))
         else
           not_found!
         end
@@ -379,7 +467,7 @@ module Sensu
       $redis.hgetall('events:' + client_name) do |events|
         if events.include?(check_name)
           resolve_event(event_hash(events[check_name], client_name, check_name))
-          accepted!
+          issued!
         else
           not_found!
         end
@@ -388,14 +476,14 @@ module Sensu
 
     apost %r{/(?:event/)?resolve$} do
       begin
-        post_body = JSON.parse(request.body.read, :symbolize_names => true)
+        post_body = Oj.load(request.body.read)
         client_name = post_body[:client]
         check_name = post_body[:check]
         if client_name.is_a?(String) && check_name.is_a?(String)
           $redis.hgetall('events:' + client_name) do |events|
             if events.include?(check_name)
               resolve_event(event_hash(events[check_name], client_name, check_name))
-              accepted!
+              issued!
             else
               not_found!
             end
@@ -403,7 +491,7 @@ module Sensu
         else
           bad_request!
         end
-      rescue JSON::ParserError, TypeError
+      rescue Oj::ParseError, TypeError
         bad_request!
       end
     end
@@ -412,28 +500,23 @@ module Sensu
       response = Array.new
       $redis.smembers('aggregates') do |checks|
         unless checks.empty?
-          limit = 10
-          if params[:limit]
-            limit = params[:limit] =~ /^[0-9]+$/ ? params[:limit].to_i : nil
-          end
-          unless limit.nil?
-            checks.each_with_index do |check_name, index|
-              $redis.smembers('aggregates:' + check_name) do |aggregates|
-                collection = {
-                  :check => check_name,
-                  :issued => aggregates.sort.reverse.take(limit)
-                }
-                response.push(collection)
-                if index == checks.size - 1
-                  body response.to_json
-                end
+          checks.each_with_index do |check_name, index|
+            $redis.smembers('aggregates:' + check_name) do |aggregates|
+              aggregates.map! do |issued|
+                issued.to_i
+              end
+              item = {
+                :check => check_name,
+                :issued => aggregates.sort.reverse
+              }
+              response << item
+              if index == checks.size - 1
+                body Oj.dump(response)
               end
             end
-          else
-            bad_request!
           end
         else
-          body response.to_json
+          body Oj.dump(response)
         end
       end
     end
@@ -441,15 +524,18 @@ module Sensu
     aget %r{/aggregates/([\w\.-]+)$} do |check_name|
       $redis.smembers('aggregates:' + check_name) do |aggregates|
         unless aggregates.empty?
-          limit = 10
-          if params[:limit]
-            limit = params[:limit] =~ /^[0-9]+$/ ? params[:limit].to_i : nil
+          aggregates.map! do |issued|
+            issued.to_i
           end
-          unless limit.nil?
-            body aggregates.sort.reverse.take(limit).to_json
-          else
-            bad_request!
+          age = integer_parameter(params[:age])
+          if age
+            timestamp = Time.now.to_i - age
+            aggregates.reject! do |issued|
+              issued > timestamp
+            end
           end
+          aggregates = pagination(aggregates.sort.reverse)
+          body Oj.dump(aggregates)
         else
           not_found!
         end
@@ -485,8 +571,8 @@ module Sensu
           end
           $redis.hgetall('aggregation:' + result_set) do |results|
             parsed_results = results.inject(Array.new) do |parsed, (client_name, check_json)|
-              check = JSON.parse(check_json, :symbolize_names => true)
-              parsed.push(check.merge(:client => client_name))
+              check = Oj.load(check_json)
+              parsed << check.merge(:client => client_name)
             end
             if params[:summarize]
               options = params[:summarize].split(',')
@@ -501,7 +587,7 @@ module Sensu
             if params[:results]
               response[:results] = parsed_results
             end
-            body response.to_json
+            body Oj.dump(response)
           end
         else
           not_found!
@@ -511,13 +597,13 @@ module Sensu
 
     apost %r{/stash(?:es)?/(.*)} do |path|
       begin
-        post_body = JSON.parse(request.body.read)
-        $redis.set('stash:' + path, post_body.to_json) do
+        post_body = Oj.load(request.body.read)
+        $redis.set('stash:' + path, Oj.dump(post_body)) do
           $redis.sadd('stashes', path) do
-            created!
+            created!(Oj.dump(:path => path))
           end
         end
-      rescue JSON::ParserError
+      rescue Oj::ParseError
         bad_request!
       end
     end
@@ -547,30 +633,45 @@ module Sensu
     end
 
     aget '/stashes' do
+      response = Array.new
       $redis.smembers('stashes') do |stashes|
-        body stashes.to_json
+        stashes = pagination(stashes)
+        unless stashes.empty?
+          stashes.each_with_index do |path, index|
+            $redis.get('stash:' + path) do |stash_json|
+              unless stash_json.nil?
+                item = {
+                  :path => path,
+                  :content => Oj.load(stash_json)
+                }
+                response << item
+              end
+              if index == stashes.size - 1
+                body Oj.dump(response)
+              end
+            end
+          end
+        else
+          body Oj.dump(response)
+        end
       end
     end
 
     apost '/stashes' do
       begin
-        post_body = JSON.parse(request.body.read)
-        if post_body.is_a?(Array) && post_body.size > 0
-          response = Hash.new
-          post_body.each_with_index do |path, index|
-            $redis.get('stash:' + path) do |stash_json|
-              unless stash_json.nil?
-                response[path] = JSON.parse(stash_json)
-              end
-              if index == post_body.size - 1
-                body response.to_json
-              end
+        post_body = Oj.load(request.body.read)
+        path = post_body[:path]
+        content = post_body[:content]
+        if path.is_a?(String) && content.is_a?(Hash)
+          $redis.set('stash:' + path, Oj.dump(content)) do
+            $redis.sadd('stashes', path) do
+              created!(Oj.dump(:path => path))
             end
           end
         else
           bad_request!
         end
-      rescue JSON::ParserError
+      rescue Oj::ParseError
         bad_request!
       end
     end

@@ -1,17 +1,15 @@
 module Sensu
   unless defined?(Sensu::VERSION)
-    VERSION = '0.9.9.beta.4'
+    VERSION = '0.9.13'
 
-    DEFAULT_OPTIONS = {
-      :config_file => '/etc/sensu/config.json',
-      :config_dir => '/etc/sensu/conf.d',
-      :log_level => :info
-    }
+    LOG_LEVELS = [:debug, :info, :warn, :error, :fatal]
 
     SETTINGS_CATEGORIES = [:checks, :filters, :mutators, :handlers]
 
-    EXTENSION_CATEGORIES = [:mutators, :handlers]
+    EXTENSION_CATEGORIES = [:checks, :mutators, :handlers]
 
     SEVERITIES = %w[ok warning critical unknown]
+
+    STOP_SIGNALS = %w[INT TERM]
   end
 end

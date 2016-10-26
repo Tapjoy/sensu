@@ -19,6 +19,7 @@ module Sensu
       base = Base.new(options)
       @logger = base.logger
       @settings = base.settings
+      @extensions = base.extensions
       base.setup_process
       @timers = Array.new
       @checks_in_progress = Array.new
@@ -50,7 +51,7 @@ module Sensu
       @logger.debug('publishing keepalive', {
         :payload => payload
       })
-      @amq.queue('keepalives').publish(payload.to_json)
+      @amq.direct('keepalives').publish(Oj.dump(payload))
     end
 
     def setup_keepalives
@@ -71,38 +72,46 @@ module Sensu
       @logger.info('publishing check result', {
         :payload => payload
       })
-      @amq.queue('results').publish(payload.to_json)
+      @amq.direct('results').publish(Oj.dump(payload))
     end
 
-    def execute_check(check)
-      @logger.debug('attempting to execute check', {
+    def substitute_command_tokens(check)
+      unmatched_tokens = Array.new
+      substituted = check[:command].gsub(/:::(.*?):::/) do
+        token, default = $1.to_s.split('|')
+        matched = token.split('.').inject(@settings[:client]) do |client, attribute|
+          if client[attribute].nil?
+            default.nil? ? break : default
+          else
+            client[attribute]
+          end
+        end
+        if matched.nil?
+          unmatched_tokens << token
+        end
+        matched
+      end
+      [substituted, unmatched_tokens]
+    end
+
+    def execute_check_command(check)
+      @logger.debug('attempting to execute check command', {
         :check => check
       })
       unless @checks_in_progress.include?(check[:name])
-        @logger.debug('executing check', {
-          :check => check
-        })
-        @checks_in_progress.push(check[:name])
-        unmatched_tokens = Array.new
-        command = check[:command].gsub(/:::(.*?):::/) do
-          token = $1.to_s
-          matched = token.split('.').inject(@settings[:client]) do |client, attribute|
-            client[attribute].nil? ? break : client[attribute]
-          end
-          if matched.nil?
-            unmatched_tokens.push(token)
-          end
-          matched
-        end
+        @checks_in_progress << check[:name]
+        command, unmatched_tokens = substitute_command_tokens(check)
+        check[:executed] = Time.now.to_i
         if unmatched_tokens.empty?
+          check[:command_executed] = command
           execute = Proc.new do
+            @logger.debug('executing check command', {
+              :check => check
+            })
             started = Time.now.to_f
             begin
               check[:output], check[:status] = IO.popen(command, 'r', check[:timeout])
             rescue => error
-              @logger.warn('unexpected error', {
-                :error => error.to_s
-              })
               check[:output] = 'Unexpected error: ' + error.to_s
               check[:status] = 2
             end
@@ -115,107 +124,141 @@ module Sensu
           end
           EM::defer(execute, publish)
         else
-          @logger.warn('missing client attributes', {
-            :check => check,
-            :unmatched_tokens => unmatched_tokens
-          })
-          check[:output] = 'Missing client attributes: ' + unmatched_tokens.join(', ')
+          check[:output] = 'Unmatched command tokens: ' + unmatched_tokens.join(', ')
           check[:status] = 3
           check[:handle] = false
           publish_result(check)
           @checks_in_progress.delete(check[:name])
         end
       else
-        @logger.warn('previous check execution in progress', {
+        @logger.warn('previous check command execution in progress', {
           :check => check
         })
       end
     end
 
-    def setup_subscriptions
-      @logger.debug('subscribing to client subscriptions')
-      @uniq_queue_name ||= rand(36 ** 32).to_s(36)
-      @check_request_queue = @amq.queue(@uniq_queue_name, :auto_delete => true)
-      @settings[:client][:subscriptions].uniq.each do |exchange_name|
-        @logger.debug('binding queue to exchange', {
-          :queue => @uniq_queue_name,
-          :exchange => {
-            :name => exchange_name
-          }
-        })
-        @check_request_queue.bind(@amq.fanout(exchange_name))
+    def run_check_extension(check)
+      @logger.debug('attempting to run check extension', {
+        :check => check
+      })
+      check[:executed] = Time.now.to_i
+      extension = @extensions[:checks][check[:name]]
+      extension.run do |output, status|
+        check[:output] = output
+        check[:status] = status
+        publish_result(check)
       end
-      @check_request_queue.subscribe do |payload|
-        begin
-          check = JSON.parse(payload, :symbolize_names => true)
-          @logger.info('received check request', {
+    end
+
+    def process_check(check)
+      @logger.debug('processing check', {
+        :check => check
+      })
+      if check.has_key?(:command)
+        if @settings.check_exists?(check[:name])
+          check.merge!(@settings[:checks][check[:name]])
+          execute_check_command(check)
+        elsif @safe_mode
+          check[:output] = 'Check is not locally defined (safe mode)'
+          check[:status] = 3
+          check[:handle] = false
+          check[:executed] = Time.now.to_i
+          publish_result(check)
+        else
+          execute_check_command(check)
+        end
+      else
+        if @extensions.check_exists?(check[:name])
+          run_check_extension(check)
+        else
+          @logger.warn('unknown check extension', {
             :check => check
-          })
-          if @settings.check_exists?(check[:name])
-            check.merge!(@settings[:checks][check[:name]])
-            execute_check(check)
-          elsif @safe_mode
-            @logger.warn('check is not defined', {
-              :check => check
-            })
-            check[:output] = 'Check is not defined (safe mode)'
-            check[:status] = 3
-            check[:handle] = false
-            publish_result(check)
-          else
-            execute_check(check)
-          end
-        rescue JSON::ParserError => error
-          @logger.warn('check request payload must be valid json', {
-            :payload => payload,
-            :error => error.to_s
           })
         end
       end
     end
 
-    def setup_standalone
-      @logger.debug('scheduling standalone checks')
-      standalone_check_count = 0
+    def setup_subscriptions
+      @logger.debug('subscribing to client subscriptions')
+      @check_request_queue = @amq.queue('', :auto_delete => true) do |queue|
+        @settings[:client][:subscriptions].each do |exchange_name|
+          @logger.debug('binding queue to exchange', {
+            :queue_name => queue.name,
+            :exchange_name => exchange_name
+          })
+          queue.bind(@amq.fanout(exchange_name))
+        end
+        queue.subscribe do |payload|
+          begin
+            check = Oj.load(payload)
+            @logger.info('received check request', {
+              :check => check
+            })
+            process_check(check)
+          rescue Oj::ParseError => error
+            @logger.warn('check request payload must be valid json', {
+              :payload => payload,
+              :error => error.to_s
+            })
+          end
+        end
+      end
+    end
+
+    def schedule_checks(checks)
+      check_count = 0
       stagger = testing? ? 0 : 2
-      @settings.checks.each do |check|
-        if check[:standalone]
-          standalone_check_count += 1
-          scheduling_delay = stagger * standalone_check_count % 30
-          @timers << EM::Timer.new(scheduling_delay) do
-            interval = testing? ? 0.5 : check[:interval]
-            @timers << EM::PeriodicTimer.new(interval) do
-              if @rabbitmq.connected?
-                check[:issued] = Time.now.to_i
-                execute_check(check)
-              end
+      checks.each do |check|
+        check_count += 1
+        scheduling_delay = stagger * check_count % 30
+        @timers << EM::Timer.new(scheduling_delay) do
+          interval = testing? ? 0.5 : check[:interval]
+          @timers << EM::PeriodicTimer.new(interval) do
+            if @rabbitmq.connected?
+              check[:issued] = Time.now.to_i
+              process_check(check)
             end
           end
         end
       end
     end
 
+    def setup_standalone
+      @logger.debug('scheduling standalone checks')
+      standard_checks = @settings.checks.select do |check|
+        check[:standalone]
+      end
+      extension_checks = @extensions.checks.select do |check|
+        check[:standalone] && check[:interval].is_a?(Integer)
+      end
+      schedule_checks(standard_checks + extension_checks)
+    end
+
     def setup_sockets
       @logger.debug('binding client tcp socket')
       EM::start_server('127.0.0.1', 3030, Socket) do |socket|
-        socket.protocol = :tcp
         socket.logger = @logger
         socket.settings = @settings
         socket.amq = @amq
       end
       @logger.debug('binding client udp socket')
       EM::open_datagram_socket('127.0.0.1', 3030, Socket) do |socket|
-        socket.protocol = :udp
         socket.logger = @logger
         socket.settings = @settings
         socket.amq = @amq
+        socket.reply = false
       end
     end
 
-    def unsubscribe(&block)
+    def unsubscribe
       @logger.warn('unsubscribing from client subscriptions')
-      @check_request_queue.unsubscribe
-      block.call
+      if @rabbitmq.connected?
+        @check_request_queue.unsubscribe
+      else
+        @check_request_queue.before_recovery do
+          @check_request_queue.unsubscribe
+        end
+      end
     end
 
     def complete_checks_in_progress(&block)
@@ -243,8 +286,9 @@ module Sensu
       @timers.each do |timer|
         timer.cancel
       end
-      unsubscribe do
-        complete_checks_in_progress do
+      unsubscribe
+      complete_checks_in_progress do
+        @extensions.stop_all do
           @rabbitmq.close
           @logger.warn('stopping reactor')
           EM::stop_event_loop
@@ -253,8 +297,15 @@ module Sensu
     end
 
     def trap_signals
-      %w[INT TERM].each do |signal|
+      @signals = Array.new
+      STOP_SIGNALS.each do |signal|
         Signal.trap(signal) do
+          @signals << signal
+        end
+      end
+      EM::PeriodicTimer.new(1) do
+        signal = @signals.shift
+        if STOP_SIGNALS.include?(signal)
           @logger.warn('received signal', {
             :signal => signal
           })

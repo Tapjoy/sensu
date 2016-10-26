@@ -1,16 +1,16 @@
 module Sensu
   module Extension
-    class Debug < Handler
+    class Fail < Mutator
       def name
-        'debug'
+        'fail'
       end
 
       def description
-        'outputs json event data'
+        'fails to do anything'
       end
 
       def run(event, settings, &block)
-        block.call(Oj.dump(event), 0)
+        block.call('fail', 2)
       end
     end
   end

@@ -1,4 +1,114 @@
-## 0.9.9 - TBD
+## 0.9.13 - 2013-05-20
+
+### Features
+
+The Sensu API now provides /health, an endpoint for connection & queue
+monitoring. Monitor Sensu health with services like Pingdom.
+
+Sensu clients can configure their own keepalive handler(s) & thresholds.
+
+Command substitution tokens can have default values
+(eg. :::foo.bar|default:::).
+
+Check result (& event) data now includes "command_executed", the command
+after token substitution.
+
+### Other
+
+Validating check results, as bugs in older Sensu clients may produce
+invalid or malformed results.
+
+Improved stale client monitoring, to better handle client deletions.
+
+Improved check validation, names must not contain spaces or special
+characters, & an "interval" is not required when "publish" is false.
+
+## 0.9.12 - 2013-04-03
+
+### Features
+
+The Sensu API now provides client history, providing a list of executed
+checks, their status histories, and last execution timestamps. The client
+history endpoint is /clients/\<client-name\>/history, which returns a JSON
+body.
+
+The Sensu API can now bind to a specific address. To bind to an address,
+use the API configuration key "bind", with a string value (eg.
+"127.0.0.1").
+
+A stop hook was added to the Sensu extension API, enabling gracefull
+stop for extensions. The stop hook is called before the event loop comes
+to a halt.
+
+The Sensu client now supports check extensions, checks the run within the
+Sensu Ruby VM, for aggresive service monitoring & metric collection.
+
+### Non-backwards compatible changes
+
+The Sensu API stashes route changed, GET /stashes now returns an array of
+stash objects, with support for pagination. The API no longer uses POST
+for multi-get.
+
+Sensu services no longer have config file or directory defaults.
+Configuration paths a left to packaging.
+
+### Other
+
+All Sensu API 201 & 202 status responses now return a body.
+
+The Sensu server now "pauses" when reconnecting to RabbitMQ. Pausing the
+Sensu server when reconnecting to RabbitMQ fixes an issue when it is also
+reconnecting to Redis.
+
+Keepalive checks now produce results with a zero exit status, fixing
+keepalive check history.
+
+Sensu runs on Ruby 2.0.0p0.
+
+Replaced the JSON parser with a faster implementation.
+
+Replaced the Sensu logger with a more lightweight & EventMachine
+friendly implementation. No more TTY detection with colours.
+
+Improved config validation.
+
+## 0.9.11 - 2013-02-22
+
+### Features
+
+API aggregate age filter parameter.
+
+### Non-backwards compatible changes
+
+Removed /info "health" in favour of RabbitMQ & Redis "connected".
+
+### Other
+
+No longer using the default AMQP exchange or publishing directly to queues.
+
+Removed API health filter, as the Redis connection now recovers.
+
+Fixed config & extension directory loading on Windows.
+
+Client socket handles non-ascii input.
+
+## 0.9.10 - 2013-01-30
+
+### Features
+
+Handlers can be subdued like checks, suppression windows.
+
+### Non-backwards compatible changes
+
+Extensions have access to settings.
+
+### Other
+
+Client queue names are now determined by the broker (RabbitMQ).
+
+Improved zombie reaping.
+
+## 0.9.9 - 2013-01-14
 
 ### Features
 

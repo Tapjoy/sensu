@@ -1,23 +1,26 @@
 module Sensu
   class Socket < EM::Connection
-    attr_accessor :protocol, :logger, :settings, :amq
+    attr_accessor :logger, :settings, :amq, :reply
 
-    def reply(data)
-      if @protocol == :tcp
+    def respond(data)
+      unless @reply == false
         send_data(data)
       end
     end
 
     def receive_data(data)
-      if data.strip == 'ping'
+      if data =~ /[\x80-\xff]/n
+        @logger.warn('socket received non-ascii characters')
+        respond('invalid')
+      elsif data.strip == 'ping'
         @logger.debug('socket received ping')
-        reply('pong')
+        respond('pong')
       else
         @logger.debug('socket received data', {
           :data => data
         })
         begin
-          check = JSON.parse(data, :symbolize_names => true)
+          check = Oj.load(data)
           validates = [:name, :output].all? do |key|
             check[key].is_a?(String)
           end
@@ -31,20 +34,20 @@ module Sensu
             @logger.info('publishing check result', {
               :payload => payload
             })
-            @amq.queue('results').publish(payload.to_json)
-            reply('ok')
+            @amq.direct('results').publish(Oj.dump(payload))
+            respond('ok')
           else
             @logger.warn('invalid check result', {
               :check => check
             })
-            reply('invalid')
+            respond('invalid')
           end
-        rescue JSON::ParserError => error
+        rescue Oj::ParseError => error
           @logger.warn('check result must be valid json', {
             :data => data,
             :error => error.to_s
           })
-          reply('invalid')
+          respond('invalid')
         end
       end
     end

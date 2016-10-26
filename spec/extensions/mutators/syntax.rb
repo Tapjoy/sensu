@@ -9,7 +9,7 @@ module Sensu
         'will raise a script error'
       end
 
-      def run(event, &block)
+      def run(event, settings, &block)
           block.call('boom', 0)
         end
       end

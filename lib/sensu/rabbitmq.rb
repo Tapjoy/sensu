@@ -1,4 +1,4 @@
-gem 'amqp', '0.9.8'
+gem 'amqp', '0.9.10'
 
 require 'amqp'
 
@@ -27,9 +27,6 @@ module Sensu
     end
 
     def connect(options={})
-      options.reject! do |key, value|
-        key == :heartbeat
-      end
       on_failure = Proc.new do
         error = RabbitMQError.new('cannot connect to rabbitmq')
         @on_error.call(error)
@@ -38,7 +35,7 @@ module Sensu
         :on_tcp_connection_failure => on_failure,
         :on_possible_authentication_failure => on_failure
       })
-      @connection.logger = NullLogger.get
+      @connection.logger = Logger.get
       @connection.on_tcp_connection_loss do |connection, settings|
         unless connection.reconnecting?
           @before_reconnect.call

@@ -13,15 +13,22 @@ module Sensu
     end
 
     EXTENSION_CATEGORIES.each do |category|
-      define_method(category.to_s.chop + '_exists?') do |extension_name|
-        @extensions[category].has_key?(extension_name)
+      define_method(category) do
+        @extensions[category].map do |name, extension|
+          extension.definition
+        end
+      end
+
+      define_method(category.to_s.chop + '_exists?') do |name|
+        @extensions[category].has_key?(name)
       end
     end
 
     def require_directory(directory)
-      Dir.glob(File.join(directory, '**/*.rb')).each do |file|
+      path = directory.gsub(/\\(?=\S)/, '/')
+      Dir.glob(File.join(path, '**/*.rb')).each do |file|
         begin
-          require file
+          require File.expand_path(file)
         rescue ScriptError => error
           @logger.error('failed to require extension', {
             :extension_file => file,
@@ -44,6 +51,25 @@ module Sensu
           loaded(extension_type, extension.name, extension.description)
         end
       end
+    end
+
+    def stop_all(&block)
+      all = @extensions.map do |category, extensions|
+        extensions.map do |name, extension|
+          extension
+        end
+      end
+      all.flatten!
+      stopper = Proc.new do |extension|
+        if extension.nil?
+          block.call
+        else
+          extension.stop do
+            stopper.call(all.pop)
+          end
+        end
+      end
+      stopper.call(all.pop)
     end
 
     private
@@ -82,8 +108,12 @@ module Sensu
         definition.has_key?(key.to_sym)
       end
 
-      def run(event=nil, &block)
+      def run(event=nil, settings={}, &block)
         block.call('noop', 0)
+      end
+
+      def stop(&block)
+        block.call
       end
 
       def self.descendants

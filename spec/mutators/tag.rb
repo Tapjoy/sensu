@@ -1,9 +1,11 @@
 #!/usr/bin/env ruby
 
 require 'rubygems'
-require 'json'
+require 'oj'
 
-event = JSON.parse(STDIN.read, :symbolize_names => true)
+Oj.default_options = {:mode => :compat, :symbol_keys => true}
+
+event = Oj.load(STDIN.read)
 event.merge!(:mutated => true)
 
-puts event.to_json
+puts Oj.dump(event)

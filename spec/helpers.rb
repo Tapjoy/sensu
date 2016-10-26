@@ -33,6 +33,20 @@ module Helpers
     @amq ? @amq : setup_amq
   end
 
+  def keepalive_queue(&block)
+    queue = amq.queue('keepalives')
+    queue.bind(amq.direct('keepalives')) do
+      block.call(queue)
+    end
+  end
+
+  def result_queue(&block)
+    queue = amq.queue('results')
+    queue.bind(amq.direct('results')) do
+      block.call(queue)
+    end
+  end
+
   def timer(delay, &block)
     periodic_timer = EM::PeriodicTimer.new(delay) do
       block.call
@@ -79,7 +93,13 @@ module Helpers
       :address => '127.0.0.1',
       :subscriptions => [
         'test'
-      ]
+      ],
+      :keepalive => {
+        :thresholds => {
+          :warning => 60,
+          :critical => 120
+        }
+      }
     }
   end
 
@@ -126,13 +146,16 @@ module Helpers
       }
     }
     request_options = default_options.merge(options)
+    if request_options[:body].is_a?(Hash) || request_options[:body].is_a?(Array)
+      request_options[:body] = Oj.dump(request_options[:body])
+    end
     http = EM::HttpRequest.new('http://localhost:4567' + uri).send(method, request_options)
     http.callback do
       body = case
       when http.response.empty?
         http.response
       else
-        JSON.parse(http.response, :symbolize_names => true)
+        Oj.load(http.response)
       end
       block.call(http, body)
     end

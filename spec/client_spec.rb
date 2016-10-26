@@ -17,66 +17,97 @@ describe 'Sensu::Client' do
 
   it 'can send a keepalive' do
     async_wrapper do
-      @client.setup_rabbitmq
-      @client.publish_keepalive
-      amq.queue('keepalives').subscribe do |headers, payload|
-        keepalive = JSON.parse(payload, :symbolize_names => true)
-        keepalive[:name].should eq('i-424242')
-        async_done
+      keepalive_queue do |queue|
+        @client.setup_rabbitmq
+        @client.publish_keepalive
+        queue.subscribe do |payload|
+          keepalive = Oj.load(payload)
+          keepalive[:name].should eq('i-424242')
+          async_done
+        end
       end
     end
   end
 
   it 'can schedule keepalive publishing' do
     async_wrapper do
-      @client.setup_rabbitmq
-      @client.setup_keepalives
-      amq.queue('keepalives').subscribe do |headers, payload|
-        keepalive = JSON.parse(payload, :symbolize_names => true)
-        keepalive[:name].should eq('i-424242')
-        async_done
+      keepalive_queue do |queue|
+        @client.setup_rabbitmq
+        @client.setup_keepalives
+        queue.subscribe do |payload|
+          keepalive = Oj.load(payload)
+          keepalive[:name].should eq('i-424242')
+          async_done
+        end
       end
     end
   end
 
   it 'can send a check result' do
     async_wrapper do
-      @client.setup_rabbitmq
-      check = result_template[:check]
-      @client.publish_result(check)
-      amq.queue('results').subscribe do |headers, payload|
-        result = JSON.parse(payload, :symbolize_names => true)
-        result[:client].should eq('i-424242')
-        result[:check][:name].should eq('foobar')
-        async_done
+      result_queue do |queue|
+        @client.setup_rabbitmq
+        check = result_template[:check]
+        @client.publish_result(check)
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          result[:check][:name].should eq('foobar')
+          async_done
+        end
       end
     end
   end
 
-  it 'can execute a check' do
+  it 'can execute a check command' do
     async_wrapper do
-      @client.setup_rabbitmq
-      @client.execute_check(check_template)
-      amq.queue('results').subscribe do |headers, payload|
-        result = JSON.parse(payload, :symbolize_names => true)
-        result[:client].should eq('i-424242')
-        result[:check][:output].should eq('WARNING')
-        async_done
+      result_queue do |queue|
+        @client.setup_rabbitmq
+        @client.execute_check_command(check_template)
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          result[:check][:output].should eq('WARNING')
+          result[:check].should have_key(:executed)
+          async_done
+        end
       end
     end
   end
 
-  it 'can substitute check command tokens with attributes and execute it' do
+  it 'can substitute check command tokens with attributes, default values, and execute it' do
     async_wrapper do
-      @client.setup_rabbitmq
-      check = check_template
-      check[:command] = 'echo -n :::nested.attribute:::'
-      @client.execute_check(check)
-      amq.queue('results').subscribe do |headers, payload|
-        result = JSON.parse(payload, :symbolize_names => true)
-        result[:client].should eq('i-424242')
-        result[:check][:output].should eq('true')
-        async_done
+      result_queue do |queue|
+        @client.setup_rabbitmq
+        check = check_template
+        check[:command] = 'echo -n :::nested.attribute|default::: :::missing|default:::'
+        @client.execute_check_command(check)
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          result[:check][:output].should eq('true default')
+          result[:check][:command_executed] = 'echo -n true default'
+          async_done
+        end
+      end
+    end
+  end
+
+  it 'can run a check extension' do
+    async_wrapper do
+      result_queue do |queue|
+        @client.setup_rabbitmq
+        check = {
+          :name => 'sensu_gc_metrics'
+        }
+        @client.run_check_extension(check)
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          result[:check][:output].should start_with('{')
+          result[:check].should have_key(:executed)
+          async_done
+        end
       end
     end
   end
@@ -97,76 +128,88 @@ describe 'Sensu::Client' do
 
   it 'can receive a check request and execute the check' do
     async_wrapper do
-      @client.setup_rabbitmq
-      @client.setup_subscriptions
-      timer(1) do
-        amq.fanout('test').publish(check_template.to_json)
-      end
-      amq.queue('results').subscribe do |headers, payload|
-        result = JSON.parse(payload, :symbolize_names => true)
-        result[:client].should eq('i-424242')
-        result[:check][:output].should eq('WARNING')
-        result[:check][:status].should eq(1)
-        async_done
+      result_queue do |queue|
+        @client.setup_rabbitmq
+        @client.setup_subscriptions
+        timer(1) do
+          amq.fanout('test').publish(Oj.dump(check_template))
+        end
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          result[:check][:output].should eq('WARNING')
+          result[:check][:status].should eq(1)
+          async_done
+        end
       end
     end
   end
 
   it 'can receive a check request and not execute the check due to safe mode' do
     async_wrapper do
-      @client.safe_mode = true
-      @client.setup_rabbitmq
-      @client.setup_subscriptions
-      timer(1) do
-        amq.fanout('test').publish(check_template.to_json)
-      end
-      amq.queue('results').subscribe do |headers, payload|
-        result = JSON.parse(payload, :symbolize_names => true)
-        result[:client].should eq('i-424242')
-        result[:check][:output].should include('safe mode')
-        result[:check][:status].should eq(3)
-        async_done
+      result_queue do |queue|
+        @client.safe_mode = true
+        @client.setup_rabbitmq
+        @client.setup_subscriptions
+        timer(1) do
+          amq.fanout('test').publish(Oj.dump(check_template))
+        end
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          result[:check][:output].should include('safe mode')
+          result[:check][:status].should eq(3)
+          async_done
+        end
       end
     end
   end
 
   it 'can schedule standalone check execution' do
     async_wrapper do
-      @client.setup_rabbitmq
-      @client.setup_standalone
-      amq.queue('results').subscribe do |headers, payload|
-        result = JSON.parse(payload, :symbolize_names => true)
-        result[:client].should eq('i-424242')
-        result[:check][:name].should eq('standalone')
-        result[:check][:output].should eq('foobar')
-        result[:check][:status].should eq(1)
-        async_done
+      result_queue do |queue|
+        @client.setup_rabbitmq
+        @client.setup_standalone
+        expected = ['standalone', 'sensu_gc_metrics']
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          result[:check].should have_key(:issued)
+          result[:check].should have_key(:output)
+          result[:check].should have_key(:status)
+          expected.delete(result[:check][:name]).should_not be_nil
+          if expected.empty?
+            async_done
+          end
+        end
       end
     end
   end
 
   it 'can accept external result input via sockets' do
     async_wrapper do
-      @client.setup_rabbitmq
-      @client.setup_sockets
-      timer(1) do
-        EM::connect('127.0.0.1', 3030, nil) do |socket|
-          socket.send_data('{"name": "tcp", "output": "tcp", "status": 1}')
-          socket.close_connection_after_writing
+      result_queue do |queue|
+        @client.setup_rabbitmq
+        @client.setup_sockets
+        timer(1) do
+          EM::connect('127.0.0.1', 3030, nil) do |socket|
+            socket.send_data('{"name": "tcp", "output": "tcp", "status": 1}')
+            socket.close_connection_after_writing
+          end
+          EM::open_datagram_socket('127.0.0.1', 0, nil) do |socket|
+            data = '{"name": "udp", "output": "udp", "status": 1}'
+            socket.send_datagram(data, '127.0.0.1', 3030)
+            socket.close_connection_after_writing
+          end
         end
-        EM::open_datagram_socket('127.0.0.1', 0, nil) do |socket|
-          data = '{"name": "udp", "output": "udp", "status": 1}'
-          socket.send_datagram(data, '127.0.0.1', 3030)
-          socket.close_connection_after_writing
-        end
-      end
-      expected = ['tcp', 'udp']
-      amq.queue('results').subscribe do |headers, payload|
-        result = JSON.parse(payload, :symbolize_names => true)
-        result[:client].should eq('i-424242')
-        expected.delete(result[:check][:name]).should_not be_nil
-        if expected.empty?
-          async_done
+        expected = ['tcp', 'udp']
+        queue.subscribe do |payload|
+          result = Oj.load(payload)
+          result[:client].should eq('i-424242')
+          expected.delete(result[:check][:name]).should_not be_nil
+          if expected.empty?
+            async_done
+          end
         end
       end
     end
